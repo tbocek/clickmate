@@ -1,39 +1,28 @@
-const Main = imports.ui.main;
-const PanelMenu = imports.ui.panelMenu;
-const PopupMenu = imports.ui.popupMenu;
-const St = imports.gi.St;
-const GObject = imports.gi.GObject;
+import St from 'gi://St';
 
-let myPopup;
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 
-function init() {
-    log('initializing');
-}
 
-function enable() {
-    myPopup = new MyPopup();
-    Main.panel.addToStatusArea('myPopup', myPopup);
-}
+export default class ExampleExtension extends Extension {
+    enable() {
+        // Create a panel button
+        this._indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
 
-function disable() {
-    myPopup.destroy();
-    myPopup = null;
-}
+        // Add an icon
+        const icon = new St.Icon({
+            icon_name: 'face-laugh-symbolic',
+            style_class: 'system-status-icon',
+        });
+        this._indicator.add_child(icon);
 
-const MyPopup = GObject.registerClass(
-    class MyPopup extends PanelMenu.Button {
-        _init() {
-            super._init(0.0);
-
-            let icon = new St.Icon({
-                icon_name: 'face-smile-symbolic',
-                style_class: 'system-status-icon'
-            });
-
-            this.add_child(icon);
-
-            let menuItem = new PopupMenu.PopupMenuItem('Hello World!');
-            this.menu.addMenuItem(menuItem);
-        }
+        // Add the indicator to the panel
+        Main.panel.addToStatusArea(this.uuid, this._indicator);
     }
-);
+
+    disable() {
+        this._indicator?.destroy();
+        this._indicator = null;
+    }
+}
