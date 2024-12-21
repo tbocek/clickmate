@@ -1,0 +1,9 @@
+{
+  "name": "Clickmate",
+  "description": "Clickmate Autoclicker",
+  "uuid": "clickmate.tbocek.github.com",
+  "shell-version": ["47"],
+  "settings-schema": "org.gnome.shell.extensions.clickmate",
+  "url": "https://github.com/tbocek/clickmate",
+  "version": 1
+}

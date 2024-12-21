@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+    <schema id="org.gnome.shell.extensions.clickmate" path="/org/gnome/shell/extensions/clickmate/">
+        <key name="toggle-shortcut" type="as">
+            <default><![CDATA[['<Super>t']]]></default>
+            <summary>Keyboard shortcut to toggle the checkbox</summary>
+            <description>Keyboard shortcut to toggle the checkbox state</description>
+        </key>
+    </schema>
+</schemalist>
