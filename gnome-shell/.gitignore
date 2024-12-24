@@ -5,3 +5,4 @@ clickmate.zip
 .vscode/settings.json
 .zed
 node_modules
+dist
