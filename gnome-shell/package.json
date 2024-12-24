@@ -1,0 +1,32 @@
+{
+  "name": "clickmate",
+  "version": "0.0.1",
+  "description": "A TypeScript GNOME Extension",
+  "type": "module",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tbocek/clickmate.git"
+  },
+  "author": "Thomas Bocek",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tbocek/clickmate/issues"
+  },
+  "homepage": "https://github.com/tbocek/clickmate",
+  "sideEffects": false,
+  "scripts": {
+    "build": "sh -c 'glib-compile-schemas schemas && cp -r schemas dist & npx tsc & cp metadata.json dist & wait'",
+    "dev": "pnpm run build && ./run.sh",
+    "dist": "pnpm run build && cd dist && zip ../clickmate.zip -9r ."
+  },
+  "devDependencies": {
+    "eslint": "^9.17.0",
+    "eslint-plugin-jsdoc": "^50.6.1",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@girs/gjs": "^4.0.0-beta.19",
+    "@girs/gnome-shell": "^47.0.0"
+  }
+}
