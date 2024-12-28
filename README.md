@@ -4,6 +4,8 @@ Clickmate is an autoclicker daemon that can be controlled via HTTP requests. It 
 
 ![Clickmate Extension Screenshot](docs/screenshot.png)
 
+You can activate or deactivate the autoclicker using the `Ctrl+Shift+F5` keyboard shortcut.
+
 ## Features
 - **HTTP API**: Control the autoclicker status (on/off) via HTTP requests.
 - **GNOME Shell Extension**: Provides a panel button in the GNOME Shell to toggle the autoclicker on and off.
