@@ -1,7 +1,0 @@
-[Unit]
-Description=Clickmate Autoclicker
-
-[Service]
-ExecStart=/usr/local/bin/clickmate -d /dev/input/%i
-StandardOutput=null
-StandardError=journal

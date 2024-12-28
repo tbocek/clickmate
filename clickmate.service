@@ -1,0 +1,12 @@
+[Unit]
+Description=Clickmate Autoclicker
+Wants=graphical.target
+ConditionPathExists=/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse
+
+[Install]
+WantedBy=graphical.target
+
+[Service]
+ExecStart=/usr/local/bin/clickmate -d /dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse
+StandardOutput=null
+StandardError=journal

@@ -1,12 +1,6 @@
-.message-label {
-    padding: 8px;
-    width: 200px;
-}
-
-.message-label.error {
+.error-label {
     color: red;
 }
 
-.message-label.success {
-    color: green;
+.status-label {
 }
