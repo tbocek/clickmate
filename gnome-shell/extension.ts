@@ -1,4 +1,3 @@
-import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
@@ -7,7 +6,6 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
-import {Button} from "@girs/gnome-shell/ui/panelMenu";
 import { PopupSwitchMenuItem, PopupMenu, PopupMenuItem } from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 interface ClickerStatus {

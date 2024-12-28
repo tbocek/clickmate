@@ -13,10 +13,6 @@ LOCAL_EXTENSIONS_DIR="$HOME/.local/share/gnome-shell/extensions"
 cleanup() {
   trap - SIGINT SIGTERM ERR EXIT
   echo "Cleaning up..."
-  # Remove the symlink on exit
-  if [ -L "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID" ]; then
-    rm "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID"
-  fi
 }
 
 setup_colors() {
@@ -44,14 +40,17 @@ Run dev environment for this gnome shell extension.
 
 Available options:
 -h, --help               Print this help and exit
+-i, --install-only       Only install extension
 EOF
   exit
 }
 
 parse_params() {
+  install_only=false;
   while :; do
     case "${1-}" in
     -h | --help) usage ;;
+    -i | --install-only) install_only=true;;
     --no-color) NO_COLOR=1 ;;
     -?*) die "Unknown option: $1";;
     *) break ;;
@@ -63,9 +62,8 @@ parse_params() {
   return 0
 }
 
-# Set up development environment
-setup_dev_environment() {
-  msg "Setting up development environment..."
+install() {
+  msg "Install..."
 
   # Check if we're in the correct directory
   if [ ! -f "metadata.json" ]; then
@@ -83,6 +81,11 @@ setup_dev_environment() {
 
   msg "Creating symlink to development directory..."
   ln -s "$EXTENSION_DIR" "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID"
+}
+
+# Set up development environment
+setup_dev_environment() {
+  msg "Setting up development environment..."
 
   gsettings set org.gnome.shell disable-user-extensions false
 
@@ -129,5 +132,14 @@ setup_colors
 parse_params "$@"
 # Main execution
 msg "${GREEN}Setting up development environment...${NOFORMAT}"
-setup_dev_environment
-run_nested_shell
+
+install
+
+if [ ! "$install_only" ]; then
+  setup_dev_environment
+  run_nested_shell
+  # Remove the symlink on exit
+  if [ -L "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID" ]; then
+    rm "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID"
+  fi
+fi
