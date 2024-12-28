@@ -135,7 +135,8 @@ msg "${GREEN}Setting up development environment...${NOFORMAT}"
 
 install
 
-if [ ! "$install_only" ]; then
+echo $install_only
+if [ "$install_only" != "true" ]; then
   setup_dev_environment
   run_nested_shell
   # Remove the symlink on exit

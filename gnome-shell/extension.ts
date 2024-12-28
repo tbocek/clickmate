@@ -59,7 +59,7 @@ export default class MyExtension extends Extension {
             // Skip HTTP headers
             let line;
             while ((line = dataInputStream.read_line(null)[0])) {
-                if (line.length === 0) break;
+                if (line.length === 0 || line.toString().trim() === "") break;
             }
 
             // Read JSON response
@@ -103,7 +103,7 @@ export default class MyExtension extends Extension {
             // Skip HTTP headers
             let line;
             while ((line = dataInputStream.read_line(null)[0])) {
-                if (line.length === 0) break;
+                if (line.length === 0 || line.toString().trim() === "") break;
             }
 
             // Read JSON response
@@ -157,6 +157,9 @@ export default class MyExtension extends Extension {
                 this._isUpdatingToggle = false;
                 this.updateStatusLabel(true);
             } else {
+                this._isUpdatingToggle = true;
+                item.setToggleState(item.state);
+                this._isUpdatingToggle = false;
                 this.updateStatusLabel(false);
             }
 
@@ -172,6 +175,22 @@ export default class MyExtension extends Extension {
 
         // Add the menu item to the indicator
         if (this._indicator.menu instanceof PopupMenu) {
+
+            // Connect to menu open event to refresh status
+            this._indicator.menu.connectObject('open-state-changed', async (_menu: PopupMenu, isOpen: boolean) => {
+                if (isOpen) {
+                    const status = await this.checkClickerStatus();
+                    if (status && this._toggleItem) {
+                        this._isUpdatingToggle = true;
+                        this._toggleItem.setToggleState(status.status === 'on');
+                        this._isUpdatingToggle = false;
+                        this.updateStatusLabel(false);
+                    } else {
+                        this.updateStatusLabel(true);
+                    }
+                }
+            }, this);
+
             this._indicator.menu.addMenuItem(this._toggleItem);
 
             // Add status label in a menu item
@@ -185,7 +204,7 @@ export default class MyExtension extends Extension {
             'toggle-autoclicker',
             this.getSettings(), // Your extension's settings
             Meta.KeyBindingFlags.NONE,
-            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            Shell.ActionMode.ALL,
             () => this.toggleAutoclicker()
         );
 
