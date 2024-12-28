@@ -1,55 +1,82 @@
 # Clickmate Autoclicker
 
-...
+Clickmate is an autoclicker daemon that can be controlled via HTTP requests. It allows you to programmatically start and stop mouse click events on your system. The daemon runs as a background service and communicates with a GNOME Shell extension to provide a user-friendly interface for toggling the autoclicker.
+
+![Clickmate Extension Screenshot](docs/screenshot.png)
+
+## Features
+- **HTTP API**: Control the autoclicker status (on/off) via HTTP requests.
+- **GNOME Shell Extension**: Provides a panel button in the GNOME Shell to toggle the autoclicker on and off.
+- **Daemon Service**: Runs as a background service, managed by systemd for easy installation and uninstallation.
+
+## Requirements
+- **Linux System**: The daemon uses Linux-specific APIs (`uinput`).
+- **GCC Compiler**: Required to compile the C code.
+- **libjson-c**: JSON parsing library.
+- **libmicrohttpd**: Micro HTTP Daemon library for handling HTTP requests.
+- **GNOME Shell**: For running the GNOME Shell extension.
 
 ## Installation
 
- * create binary with ```make```
- * install it with ```sudo make install```
+### Compile and Install Daemon
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-repo/clickmate.git
+   cd clickmate
+   ```
 
-This will copy 3 files: clickmate, 80-clickmate.rules, and clickmate@.service
+2. Build the daemon:
+   ```bash
+   make
+   ```
 
-T
-## Run
+3. Install the daemon and service file:
+   ```bash
+   sudo make install
+   ```
 
+### Enable GNOME Shell Extension
+1. cd gnome-shell
+2. pnpm install
+3. pnpm run build
+4. pnpm run install
+5. Gnome Shell Logout/Login
+6. Enable clickmate in the extensions manager
 
+## Usage
 
+### Control via HTTP API
+You can control the autoclicker status by sending HTTP requests to the daemon's Unix socket (`/var/run/click-socket`).
 
-## Unistallation
-
-To uninstall with make use:
-
+#### Start Autoclicker
+```bash
+curl --unix-socket /var/run/click-socket -X POST -H "Content-Type: application/json" -d '{"status":"on"}'
 ```
+
+#### Stop Autoclicker
+```bash
+curl --unix-socket /var/run/click-socket -X POST -H "Content-Type: application/json" -d '{"status":"off"}'
+```
+
+#### Check Status
+```bash
+curl --unix-socket /var/run/click-socket -X GET
+```
+
+### Control via GNOME Shell Extension
+1. Click on the mouse icon in the GNOME panel.
+2. Toggle the switch to start or stop the autoclicker.
+
+## Uninstallation
+
+### Remove Daemon and Service File
+```bash
 sudo make uninstall
 ```
 
-To uninstall manually, you can type (if you are not root, use sudo):
+## Troubleshooting
+- **Daemon Not Starting**: Ensure you have the necessary permissions to access `/dev/uinput` and that `libjson-c` and `libmicrohttpd` are installed.
+- **Extension Not Working**: Make sure the GNOME Shell extension is enabled and that the daemon is running.
 
-```
-systemctl stop 'clickmate@*.service'
-rm /usr/local/bin/clickmate
-rm /etc/udev/rules.d/80-clickmate.rules
-rm /etc/systemd/system/clickmate@.service
-udevadm control --reload
-systemctl restart systemd-udevd.service
-systemctl daemon-reload
-```
-
-### Resolving a Boot Delay
-
-If you experience an x-minute boot delay after installing the script, it's likely due to the `systemd-udev-settle.service`. The code seems to call this service, causing the computer to wait for device initialization, which significantly slows down the boot process.
-
-This service is deprecated, and you can restore normal boot times by masking it with the following command:
-```bash
-systemctl mask systemd-udev-settle.service
-```
-
----
-
-## Related Links
-I used the following sites for inspiration:
-
- * https://www.kernel.org/doc/html/v4.12/input/uinput.html
- * https://www.linuxquestions.org/questions/programming-9/uinput-any-complete-example-4175524044/
- * https://stackoverflow.com/questions/20943322/accessing-keys-from-linux-input-device
- * https://gist.github.com/toinsson/7e9fdd3c908b3c3d3cd635321d19d44d
+## Contributing
+Contributions are welcome! Please fork the repository, make your changes, and submit a pull request.
