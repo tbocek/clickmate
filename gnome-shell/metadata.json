@@ -4,5 +4,5 @@
   "uuid": "clickmate@tbocek.github.com",
   "settings-schema": "org.gnome.shell.extensions.clickmate",
   "url": "https://github.com/tbocek/clickmate",
-  "shell-version": ["47"]
+  "shell-version": ["48"]
 }
