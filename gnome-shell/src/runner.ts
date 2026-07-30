@@ -102,9 +102,6 @@ export class MacroRunner {
 
         try {
             this._neutralizePointerAccel();
-            if (macro.suppressInput) {
-                await this._daemon.setSuppressInput(true);
-            }
             const signal = await this._runList(macro.body);
             if (this._cancelled) {
                 reason = 'stopped';
@@ -120,13 +117,6 @@ export class MacroRunner {
                 logError(error as Error, 'clickmate: macro failed');
             }
         } finally {
-            try {
-                if (macro.suppressInput) {
-                    await this._daemon.setSuppressInput(false);
-                }
-            } catch (error) {
-                log(`clickmate: could not clear input suppression: ${(error as Error).message}`);
-            }
             this._restorePointerAccel();
             this._running = false;
             this._callbacks.onRunningChanged?.(false);

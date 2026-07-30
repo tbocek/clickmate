@@ -1,4 +1,5 @@
-// On-screen chrome: the run HUD and the drag-to-select region picker.
+// On-screen chrome: the position marker and the drag-to-select region picker.
+// Status text lives in the panel menu, not in a floating overlay.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -8,86 +9,6 @@ import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import type { Region } from '../src/model.js';
-
-/**
- * A compact always-on-top status strip, so a macro can run with the popup closed
- * while you still see which step it is on and can stop it with one click.
- */
-export class RunHud {
-    private _box: St.BoxLayout;
-    private _statusLabel: St.Label;
-    private _detailLabel: St.Label;
-    private _visible = false;
-
-    constructor(onStop: () => void) {
-        this._box = new St.BoxLayout({
-            style_class: 'clickmate-hud',
-            vertical: false,
-            reactive: true,
-            track_hover: true,
-        });
-
-        const labels = new St.BoxLayout({ vertical: true, x_expand: true });
-        this._statusLabel = new St.Label({ text: '', style_class: 'clickmate-hud-status' });
-        this._detailLabel = new St.Label({ text: '', style_class: 'clickmate-hud-detail' });
-        labels.add_child(this._statusLabel);
-        labels.add_child(this._detailLabel);
-        this._box.add_child(labels);
-
-        const stopButton = new St.Button({
-            style_class: 'clickmate-hud-stop',
-            label: 'Stop',
-            can_focus: true,
-        });
-        stopButton.connect('clicked', () => onStop());
-        this._box.add_child(stopButton);
-    }
-
-    setStatus(text: string): void {
-        this._statusLabel.text = text;
-    }
-
-    setDetail(text: string): void {
-        this._detailLabel.text = text;
-        this._detailLabel.visible = text !== '';
-    }
-
-    show(): void {
-        if (this._visible) {
-            return;
-        }
-        this._visible = true;
-        Main.layoutManager.addChrome(this._box, { affectsInputRegion: true });
-        this._reposition();
-    }
-
-    hide(): void {
-        if (!this._visible) {
-            return;
-        }
-        this._visible = false;
-        Main.layoutManager.removeChrome(this._box);
-    }
-
-    private _reposition(): void {
-        const monitor = Main.layoutManager.primaryMonitor;
-        if (!monitor) {
-            return;
-        }
-        // Top centre, just under the panel.
-        const width = Math.min(520, Math.round(monitor.width * 0.5));
-        this._box.set_width(width);
-        this._box.set_position(
-            monitor.x + Math.round((monitor.width - width) / 2),
-            monitor.y + Main.panel.height + 8,
-        );
-    }
-
-    destroy(): void {
-        this.hide();
-        this._box.destroy();
-    }
-}
 
 let markerTimeoutId = 0;
 let markerActor: St.Widget | null = null;

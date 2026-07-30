@@ -6,8 +6,8 @@ conditions that can look at the screen.
 ![Clickmate Extension Screenshot](docs/screenshot.png)
 
 A macro is a tree of steps: clicks, key presses, typed text, scrolls, waits and
-recorded event trains. Around them you can put `repeat`, `while`, `if` and `gate`
-blocks, and each of those is driven by a condition:
+recorded event trains. Around them you can put `repeat`, `while` and `if`
+blocks, and the latter two are driven by a condition:
 
 - **screen colour** — "the pixel at 840,512 is green ±24", or "60% of this
   40×40 area is green". Sub-5 ms, deterministic, no network.
@@ -29,9 +29,10 @@ repeat forever:
 
 ## Features
 
-- **Recording** of real mouse and keyboard input, coalesced into readable steps
-  (clicks carry their absolute screen position, idle gaps become waits), or
-  verbatim event trains for games.
+- **Recording** of real mouse and keyboard input, coalesced into readable steps:
+  clicks carry their absolute screen position, pointer movement becomes a move
+  step wherever it comes to rest, and idle gaps become waits. Or verbatim event
+  trains, for games.
 - **A full tree editor in preferences** — every step and condition, nested
   loops and `and`/`or`/`not`, plain-language summaries, enable/disable so you can
   bisect a macro instead of deleting from it, and JSON import/export.
@@ -43,7 +44,7 @@ repeat forever:
 
 | Piece | Role |
 |---|---|
-| `clickmate.c` | Root daemon. Grabs the real input devices, mirrors them to uinput clones, injects event trains on request, and streams observed events while recording. **No macro logic.** |
+| `clickmate.c` | Root daemon. Grabs the real input devices, mirrors them to uinput clones, injects event trains on request, and streams observed events while recording. Always forwards real input. **No macro logic.** |
 | `gnome-shell/` | The extension. Owns the macro model, the editor UI, all control flow, screenshots and the model calls. |
 
 The split is deliberate: the daemon is the only thing that can see and synthesise
@@ -131,8 +132,11 @@ model actually said.
 | `Super+Escape` | Emergency stop |
 
 The panel popup holds only a master switch, the name of whatever is running, and a
-**Settings** button. Everything else — macros, steps, conditions, which macro the
-switch runs — lives in the preferences window.
+**Settings** button. It is also where progress shows up: the current step, the
+last condition verdict, "Recorded 3 steps". That text is kept after the fact,
+because most of it happens while the menu is closed — click the panel icon to
+read it. Everything else — macros, steps, conditions, which macro the switch
+runs — lives in the preferences window.
 
 Build a macro by recording it (`Ctrl+Shift+R`), then open Settings to adjust it.
 

@@ -20,7 +20,7 @@ import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
 import { childLists, describeStep, findStep, type Macro, type Step } from './src/model.js';
 import { MacroPopup } from './ui/popup.js';
-import { RunHud, pickRegion, showMarker } from './ui/overlay.js';
+import { pickRegion, showMarker } from './ui/overlay.js';
 
 const KEYBINDINGS = [
     'open-popup', 'run-macro', 'record-toggle', 'capture-step', 'panic-stop',
@@ -42,7 +42,6 @@ export default class ClickmateExtension extends Extension {
     private _runner?: MacroRunner;
     private _recorder?: Recorder;
     private _popup?: MacroPopup;
-    private _hud?: RunHud;
     private _indicator?: PanelMenu.Button;
     private _icon?: St.Icon;
     private _boundKeys: string[] = [];
@@ -80,7 +79,6 @@ export default class ClickmateExtension extends Extension {
         });
 
         this._buildIndicator();
-        this._hud = new RunHud(() => this._runner?.stop());
 
         this._storeUnsubscribe = this._store.onChanged(() => this._popup?.refresh());
         this._settingsChangedId = this._settings.connect('changed', (_settings, key) => {
@@ -112,7 +110,6 @@ export default class ClickmateExtension extends Extension {
         this._runner?.stop();
         this._recorder?.destroy();
         this._evaluator?.destroy();
-        this._hud?.destroy();
         this._popup?.destroy();
         this._indicator?.destroy();
 
@@ -134,7 +131,6 @@ export default class ClickmateExtension extends Extension {
         this._daemon = undefined;
         this._store = undefined;
         this._popup = undefined;
-        this._hud = undefined;
         this._indicator = undefined;
         this._icon = undefined;
         this._settings = undefined;
@@ -199,23 +195,16 @@ export default class ClickmateExtension extends Extension {
 
     private _onStatus(text: string): void {
         this._popup?.setDetail(text);
-        this._hud?.setStatus(text);
     }
 
     private _onTrace(trace: EvaluationTrace): void {
         const text = `${trace.condition} → ${trace.result ? 'yes' : 'no'}${trace.detail ? ` (${trace.detail})` : ''}`;
         this._popup?.setDetail(text);
-        this._hud?.setDetail(text);
     }
 
     private _onRunningChanged(running: boolean): void {
         this._updateIcon();
         this._popup?.refresh();
-        if (running) {
-            this._hud?.show();
-        } else {
-            this._hud?.hide();
-        }
     }
 
     // --- actions -----------------------------------------------------------

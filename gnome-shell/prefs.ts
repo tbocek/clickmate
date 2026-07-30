@@ -363,16 +363,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._save();
         }));
 
-        group.add(switchRow(
-            _('Take exclusive control of input'),
-            _('Drop physical mouse and keyboard input while this macro runs'),
-            macro.suppressInput ?? false,
-            value => {
-                macro.suppressInput = value;
-                this._save();
-            },
-        ));
-
         const addRow = new Adw.ActionRow({ title: _('Add a step') });
         const kindModel = new Gtk.StringList();
         for (const kind of STEP_KINDS) {
@@ -1026,7 +1016,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         ));
         recording.add(switchRow(
             _('Record pointer movement'),
-            _('Off by default: clicks already carry their own coordinates'),
+            _('Adds a move step wherever the pointer comes to rest. A move that ends in a click is left out, since the click already carries that position.'),
             this._settings.get_boolean('record-motion'),
             value => this._settings.set_boolean('record-motion', value),
         ));

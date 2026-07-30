@@ -69,9 +69,7 @@ static pthread_mutex_t held_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned char held[KEY_MAX + 1];
 static int held_fd[KEY_MAX + 1];
 
-// Recording / suppression flags.
 static volatile bool recording = false;
-static volatile bool suppress_input = false;
 
 // Event stream clients.
 static pthread_mutex_t stream_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -420,9 +418,9 @@ static void* reader_thread(void *arg) {
             break;
         }
 
-        // Forward first so real input stays responsive, unless a macro asked for
-        // exclusive control of the input devices.
-        if (d->grabbed && !suppress_input) {
+        // Always forward. Withholding real input would also withhold it from the
+        // shell, which is what handles the emergency stop.
+        if (d->grabbed) {
             emit(d->fdo, ev.type, ev.code, ev.value);
         }
 
@@ -566,11 +564,10 @@ static enum MHD_Result send_status(struct MHD_Connection *connection) {
     }
 
     snprintf(body, sizeof(body),
-             "{\"version\":%d,\"recording\":%s,\"playing\":%s,\"suppressed\":%s,\"devices\":[%s]}",
+             "{\"version\":%d,\"recording\":%s,\"playing\":%s,\"devices\":[%s]}",
              API_VERSION,
              recording ? "true" : "false",
              playing ? "true" : "false",
-             suppress_input ? "true" : "false",
              devs);
 
     return send_json(connection, MHD_HTTP_OK, body);
@@ -650,7 +647,6 @@ static enum MHD_Result handle_post(struct MHD_Connection *connection, const char
     if (strcmp(url, "/stop") == 0) {
         play_abort = 1;
         release_all_held();
-        suppress_input = false;
         if (parsed) {
             json_object_put(parsed);
         }
@@ -665,16 +661,6 @@ static enum MHD_Result handle_post(struct MHD_Connection *connection, const char
             json_object_put(parsed);
         }
         return send_json(connection, MHD_HTTP_OK, on ? "{\"recording\":true}" : "{\"recording\":false}");
-    }
-
-    if (strcmp(url, "/suppress") == 0) {
-        bool on = parsed && json_object_object_get_ex(parsed, "on", &field) && json_object_get_boolean(field);
-        suppress_input = on;
-        printf("[DEBUG] Input suppression %s\n", on ? "on" : "off");
-        if (parsed) {
-            json_object_put(parsed);
-        }
-        return send_json(connection, MHD_HTTP_OK, on ? "{\"suppressed\":true}" : "{\"suppressed\":false}");
     }
 
     if (parsed) {

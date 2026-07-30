@@ -21,6 +21,7 @@ export class MacroPopup {
     private _statusLabel: St.Label;
     private _detailLabel: St.Label;
     private _updatingSwitch = false;
+    private _message = '';
 
     constructor(deps: PopupDeps) {
         this._deps = deps;
@@ -77,10 +78,18 @@ export class MacroPopup {
         } else {
             this._statusLabel.text = `Idle — “${macro.name}” selected`;
         }
+
+        this._detailLabel.text = this._message;
+        this._detailLabel.visible = this._message !== '';
     }
 
-    /** Free-form line under the status, used for the current step and verdicts. */
+    /**
+     * The running commentary — current step, condition verdicts, "recorded N
+     * steps". Kept after the fact, because most of it happens while the menu is
+     * closed and you only read it when you open the menu again.
+     */
     setDetail(text: string): void {
+        this._message = text;
         this._detailLabel.text = text;
         this._detailLabel.visible = text !== '';
     }

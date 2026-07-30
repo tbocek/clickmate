@@ -190,8 +190,6 @@ export type StepKind = Step['kind'];
 export interface Macro {
     id: string;
     name: string;
-    /** Drop physical input while this macro runs. */
-    suppressInput?: boolean;
     body: Step[];
 }
 
@@ -211,7 +209,7 @@ export function emptyDocument(): MacroDocument {
 }
 
 export function newMacro(name = 'New macro'): Macro {
-    return { id: newId(), name, suppressInput: false, body: [] };
+    return { id: newId(), name, body: [] };
 }
 
 export function newCondition(type: ConditionType): Condition {
@@ -564,7 +562,6 @@ export function parseDocument(json: string): MacroDocument {
             const fixed: Macro = {
                 id: macro.id || newId(),
                 name: macro.name || 'Unnamed macro',
-                suppressInput: macro.suppressInput ?? false,
                 body: Array.isArray(macro.body) ? macro.body : [],
             };
             walk(fixed.body, loc => {

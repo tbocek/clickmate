@@ -17,32 +17,6 @@
     color: #e01b24;
 }
 
-/* Run HUD */
-
-.clickmate-hud {
-    spacing: 12px;
-    padding: 8px 12px;
-    border-radius: 12px;
-    background-color: rgba(0, 0, 0, 0.75);
-    color: white;
-}
-
-.clickmate-hud-status {
-    font-weight: bold;
-}
-
-.clickmate-hud-detail {
-    font-size: 0.85em;
-    color: rgba(255, 255, 255, 0.7);
-}
-
-.clickmate-hud-stop {
-    padding: 4px 12px;
-    border-radius: 6px;
-    background-color: rgba(224, 27, 36, 0.8);
-    font-weight: bold;
-}
-
 /* Position marker */
 
 .clickmate-marker-bar {

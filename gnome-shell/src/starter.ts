@@ -8,7 +8,6 @@ export function starterMacro(): Macro {
     return {
         id: newId(),
         name: 'Screen-gated loop',
-        suppressInput: false,
         body: [
             {
                 id: newId(),

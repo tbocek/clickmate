@@ -160,9 +160,9 @@
         </key>
 
         <key name="record-motion" type="b">
-            <default>false</default>
+            <default>true</default>
             <summary>Record pointer motion</summary>
-            <description>Record intermediate pointer movement instead of only click positions</description>
+            <description>Add a move step wherever the pointer comes to rest; clicks already carry their own position</description>
         </key>
 
         <key name="record-raw" type="b">

@@ -20,6 +20,9 @@ import {
 import { newId, type ClickStep, type KeyStep, type MoveStep, type RawStep, type Step, type WaitStep } from './model.js';
 import type { Config } from './store.js';
 
+/** How long the pointer must sit still before a movement counts as finished. */
+const MOTION_SETTLE_MS = 400;
+
 export interface RecorderCallbacks {
     onStep?: (step: Step) => void;
     onStatus?: (text: string) => void;
@@ -55,6 +58,7 @@ export class Recorder {
     private _rawEvents: { dt: number; type: number; code: number; value: number }[] = [];
     private _ignoredCodes = new Set<number>();
     private _settleMs = 900;
+    private _motionId = 0;
 
     constructor(daemon: DaemonClient, config: Config, callbacks: RecorderCallbacks = {}) {
         this._daemon = daemon;
@@ -169,6 +173,7 @@ export class Recorder {
     }
 
     private _clearTimers(): void {
+        this._clearMotionTimer();
         if (this._settleId) {
             GLib.source_remove(this._settleId);
             this._settleId = 0;
@@ -185,7 +190,7 @@ export class Recorder {
             return [];
         }
         this._endSession();
-        this._flushMotion();
+        this._flushMotion(true);
         if (this._config.recordRaw && this._rawEvents.length > 0) {
             const step: RawStep = {
                 id: newId(),
@@ -249,6 +254,7 @@ export class Recorder {
         if (event.type === EV_REL) {
             if (event.code === REL_X || event.code === REL_Y) {
                 this._motionPending = true;
+                this._restartMotionTimer();
             }
             return;
         }
@@ -264,9 +270,13 @@ export class Recorder {
         }
 
         this._insertGap(event.t);
-        this._flushMotion();
 
         const button = buttonFromCode(event.code);
+        // A click records the position it happened at, so movement that ends in
+        // a press would only repeat it. Movement that ends anywhere else — a key,
+        // or simply stopping — is the interesting kind and gets its own step.
+        this._flushMotion(button === null);
+
         if (button !== null) {
             this._onButton(event, button);
         } else {
@@ -274,6 +284,26 @@ export class Recorder {
         }
 
         this._lastT = event.t;
+    }
+
+    /**
+     * Movement arrives as a stream of tiny deltas, so a step is only emitted
+     * once the pointer has come to rest.
+     */
+    private _restartMotionTimer(): void {
+        this._clearMotionTimer();
+        this._motionId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MOTION_SETTLE_MS, () => {
+            this._motionId = 0;
+            this._flushMotion(true);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    private _clearMotionTimer(): void {
+        if (this._motionId) {
+            GLib.source_remove(this._motionId);
+            this._motionId = 0;
+        }
     }
 
     /** Idle gaps become explicit wait steps so playback keeps the same rhythm. */
@@ -293,12 +323,13 @@ export class Recorder {
      * Pointer movement is stored as one absolute move to wherever the pointer
      * ended up, which survives a different starting position on replay.
      */
-    private _flushMotion(): void {
+    private _flushMotion(emit: boolean): void {
+        this._clearMotionTimer();
         if (!this._motionPending) {
             return;
         }
         this._motionPending = false;
-        if (!this._config.recordMotion) {
+        if (!emit || !this._config.recordMotion) {
             return;
         }
         this._emit(this._pointerStep());

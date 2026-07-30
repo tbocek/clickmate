@@ -48,7 +48,6 @@ export interface DaemonStatus {
     version: number;
     recording: boolean;
     playing: boolean;
-    suppressed: boolean;
     devices: DaemonDevice[];
 }
 
@@ -185,7 +184,6 @@ export class DaemonClient {
             version: json.version ?? 0,
             recording: !!json.recording,
             playing: !!json.playing,
-            suppressed: !!json.suppressed,
             devices: Array.isArray(json.devices) ? json.devices : [],
         };
     }
@@ -215,9 +213,6 @@ export class DaemonClient {
         await this._request('POST', '/record', { on }, 3000);
     }
 
-    async setSuppressInput(on: boolean): Promise<void> {
-        await this._request('POST', '/suppress', { on }, 3000);
-    }
 }
 
 export interface StreamedEvent {
