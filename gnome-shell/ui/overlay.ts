@@ -10,19 +10,29 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import type { Region } from '../src/model.js';
 
-let markerTimeoutId = 0;
-let markerActor: St.Widget | null = null;
+/** How long a Show marker stays on screen. */
+const MARKER_DURATION_MS = 5000;
 
-function removeMarker(): void {
+let markerTimeoutId = 0;
+/**
+ * Every actor the current marker put on screen. Tracked as a list because the
+ * marker is more than one actor: keeping only the container meant a second Show
+ * within the timeout cancelled the first timeout and orphaned its label, which
+ * then had nothing left to remove it and stayed until logout.
+ */
+let markerActors: St.Widget[] = [];
+
+/** Take down whatever marker is showing, if any. */
+export function clearMarker(): void {
     if (markerTimeoutId) {
         GLib.source_remove(markerTimeoutId);
         markerTimeoutId = 0;
     }
-    if (markerActor) {
-        Main.layoutManager.removeChrome(markerActor);
-        markerActor.destroy();
-        markerActor = null;
+    for (const actor of markerActors) {
+        Main.layoutManager.removeChrome(actor);
+        actor.destroy();
     }
+    markerActors = [];
 }
 
 /**
@@ -30,8 +40,8 @@ function removeMarker(): void {
  * coordinate in the editor can be checked against the actual screen. Purely
  * visual: it sits above every window and does not take input.
  */
-export function showMarker(x: number, y: number, w?: number, h?: number, durationMs = 2500): void {
-    removeMarker();
+export function showMarker(x: number, y: number, w?: number, h?: number, durationMs = MARKER_DURATION_MS): void {
+    clearMarker();
 
     const isRegion = typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0;
     const container = new St.Widget({ style_class: 'clickmate-marker', reactive: false });
@@ -58,7 +68,7 @@ export function showMarker(x: number, y: number, w?: number, h?: number, duratio
 
     const label = new St.Label({
         style_class: 'clickmate-marker-label',
-        text: isRegion ? `${x},${y} ${w}×${h}` : `${x}, ${y}`,
+        text: isRegion ? `${x},${y} ${w}\u00d7${h}` : `${x}, ${y}`,
     });
     // Below the marker, unless that would run off the bottom of the screen.
     const labelY = y + (isRegion ? h! : 24) + 6;
@@ -68,12 +78,10 @@ export function showMarker(x: number, y: number, w?: number, h?: number, duratio
     Main.layoutManager.addChrome(label, { affectsInputRegion: false });
     label.set_position(Math.round(x), Math.round(fits ? labelY : y - 34));
 
-    markerActor = container;
+    markerActors = [container, label];
     markerTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
-        markerTimeoutId = 0;
-        Main.layoutManager.removeChrome(label);
-        label.destroy();
-        removeMarker();
+        markerTimeoutId = 0;   // cleared first: this source is already firing
+        clearMarker();
         return GLib.SOURCE_REMOVE;
     });
 }

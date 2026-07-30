@@ -6,8 +6,9 @@ conditions that can look at the screen.
 ![Clickmate Extension Screenshot](docs/screenshot.png)
 
 A macro is a tree of steps: clicks, key presses, typed text, scrolls, waits and
-recorded event trains. Around them you can put `loop` and `if` blocks, both
-driven by a condition:
+recorded event trains. Around them you can put `loop` and `if` blocks. A loop
+only counts — forever, or a fixed number of times; you leave it with `break`
+inside an `if`, which keeps every condition in one place:
 
 - **screen colour** — "the pixel at 840,512 is green ±24", or "60% of this
   40×40 area is green". Sub-5 ms, deterministic, no network.
@@ -31,8 +32,7 @@ repeat forever:
 
 - **Recording** of real mouse and keyboard input, coalesced into readable steps:
   clicks carry their absolute screen position, pointer movement becomes a move
-  step wherever it comes to rest, and idle gaps become waits. Or verbatim event
-  trains, for games.
+  step wherever it comes to rest, and idle gaps become waits.
 - **A full tree editor in preferences** — every step and condition, nested
   loops and `and`/`or`/`not`, plain-language summaries, enable/disable so you can
   bisect a macro instead of deleting from it, and JSON import/export.
@@ -55,14 +55,15 @@ extension sends one step at a time, stopping a macro is immediate.
 ### Absolute positioning
 
 uinput only speaks *relative* motion. To click at a fixed coordinate the extension
-nudges the pointer, re-reads `global.get_pointer()` and repeats until it lands, so
-it converges whatever the acceleration curve is doing. While a macro runs the mouse
-acceleration profile is temporarily flattened (restored afterwards, and also on the
-next login if the shell died mid-run), which makes it land on the first try.
+nudges the pointer, re-reads `global.get_pointer()` and repeats until it is within
+a pixel — up to a dozen passes, each one daemon round trip. It converges whatever
+the acceleration curve is doing, which is why nothing has to touch your mouse
+settings to make it work.
 
-If the target application grabs the pointer — games with mouse look — absolute
-moves cannot converge. Record those with **Record verbatim** enabled; they replay
-as raw relative event trains instead.
+If the target application grabs the pointer — a game with mouse-look — the
+reported position never changes and absolute moves cannot converge. The status
+line says so rather than silently clicking the wrong place. Use `move` steps with
+a relative offset for those.
 
 ## Requirements
 
@@ -71,6 +72,16 @@ as raw relative event trains instead.
 - optional: any OpenAI-compatible vision endpoint, for the `llm` condition
 
 ## Installation
+
+```bash
+./deploy.sh
+```
+
+Rebuilds and installs the daemon, rebuilds the extension, and prints what the
+daemon captured. Run it as yourself — it asks for sudo only for the daemon. Then
+log out and back in.
+
+The two halves separately:
 
 ### Daemon
 
@@ -268,8 +279,9 @@ systemctl mask systemd-udev-settle.service
   check the socket path in *Preferences → Input*.
 - **"The clickmate daemon is out of date"** — the extension needs API v2; rerun
   `sudo make install`.
-- **Clicks land in the wrong place** — leave *Flatten pointer acceleration* on, or
-  check whether the target grabs the pointer (see *Absolute positioning*).
+- **Clicks land in the wrong place** — check whether the target grabs the
+  pointer (see *Absolute positioning*); the status line reports a move that
+  could not converge.
 - **Daemon will not start** — check permissions on `/dev/uinput` and that
   `libjson-c` and `libmicrohttpd` are installed.
 

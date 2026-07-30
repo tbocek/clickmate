@@ -576,25 +576,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 }));
                 break;
 
-            case 'raw': {
-                rows.push(entryRow(_('Label'), step.label ?? '', text => {
-                    step.label = text;
-                    save();
-                }));
-                const info = new Adw.ActionRow({
-                    title: _('Recorded events'),
-                    subtitle: `${step.events.length}`,
-                });
-                const clear = new Gtk.Button({ label: _('Clear'), valign: Gtk.Align.CENTER });
-                clear.connect('clicked', () => {
-                    step.events = [];
-                    rebuild();
-                });
-                info.add_suffix(clear);
-                rows.push(info);
-                break;
-            }
-
             case 'wait':
                 rows.push(spinRow(_('Wait (ms)'), step.ms, 0, 3600000, 100, value => {
                     step.ms = Math.round(value);
@@ -607,11 +588,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 break;
 
             case 'loop': {
-                rows.push(...this._buildConditionSection(_('Keep looping while'), step.cond, next => {
-                    step.cond = next;
-                    this._saveAndRebuild();
-                }, condKey));
-
                 const forever = step.count === 'forever';
                 rows.push(switchRow(
                     _('No iteration limit'),
@@ -994,12 +970,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         daemon.add(entryRow(_('Event socket'), this._settings.get_string('event-socket'), text => {
             this._settings.set_string('event-socket', text);
         }));
-        daemon.add(switchRow(
-            _('Flatten pointer acceleration while playing'),
-            _('Makes clicks at fixed coordinates land exactly; the previous setting is restored afterwards'),
-            this._settings.get_boolean('neutralize-pointer-accel'),
-            value => this._settings.set_boolean('neutralize-pointer-accel', value),
-        ));
         page.add(daemon);
 
         const recording = new Adw.PreferencesGroup({ title: _('Recording') });
@@ -1013,12 +983,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             _('Adds a move step wherever the pointer comes to rest. A move that ends in a click is left out, since the click already carries that position.'),
             this._settings.get_boolean('record-motion'),
             value => this._settings.set_boolean('record-motion', value),
-        ));
-        recording.add(switchRow(
-            _('Record verbatim'),
-            _('Store the untouched event train instead of readable steps — needed for games that grab the pointer'),
-            this._settings.get_boolean('record-raw'),
-            value => this._settings.set_boolean('record-raw', value),
         ));
         page.add(recording);
 

@@ -136,12 +136,6 @@ export type TextStep = StepCommon & {
     delayMs?: number;
 };
 
-export type RawStep = StepCommon & {
-    kind: 'raw';
-    label?: string;
-    events: RawEvent[];
-};
-
 export type WaitStep = StepCommon & {
     kind: 'wait';
     ms: number;
@@ -149,13 +143,12 @@ export type WaitStep = StepCommon & {
 };
 
 /**
- * One loop, driven by a condition and/or a count. A plain counted loop is just
- * this with an `always` condition, which is why there is no separate `repeat`.
+ * A loop, and nothing else. It has no condition of its own: `loop while C` is
+ * exactly `loop forever: [if not C: break, …]`, and expressing it that way keeps
+ * conditions in one place — inside `if` — instead of two.
  */
 export type LoopStep = StepCommon & {
     kind: 'loop';
-    /** Checked before every iteration. */
-    cond: Condition;
     /** Iteration cap, or 'forever' for none. */
     count: number | 'forever';
     body: Step[];
@@ -178,7 +171,6 @@ export type Step =
     | ScrollStep
     | KeyStep
     | TextStep
-    | RawStep
     | WaitStep
     | LoopStep
     | IfStep
@@ -252,12 +244,10 @@ export function newStep(kind: StepKind): Step {
             return { id, kind: 'key', code: 'KEY_E', action: 'tap', mods: [], holdMs: 20 };
         case 'text':
             return { id, kind: 'text', value: '', delayMs: 12 };
-        case 'raw':
-            return { id, kind: 'raw', label: 'Recorded', events: [] };
         case 'wait':
             return { id, kind: 'wait', ms: 1000, jitterMs: 0 };
         case 'loop':
-            return { id, kind: 'loop', cond: { type: 'always' }, count: 'forever', body: [] };
+            return { id, kind: 'loop', count: 'forever', body: [] };
         case 'if':
             return { id, kind: 'if', cond: newCondition('color'), then: [], else: [] };
         case 'break':
@@ -395,6 +385,27 @@ export function lastPointerEndpoint(steps: Step[]): { x: number; y: number } | n
 }
 
 /**
+ * Verbatim recording produced opaque `raw` steps; without it nothing creates
+ * them and nothing can edit them, so any left over are dropped.
+ */
+function dropRawSteps(steps: Step[]): Step[] {
+    const kept: Step[] = [];
+    for (const step of steps) {
+        if ((step as unknown as { kind: string }).kind === 'raw') {
+            log('clickmate: dropping a verbatim step; that recording mode is gone');
+            continue;
+        }
+        for (const list of childLists(step)) {
+            const migrated = dropRawSteps(list.steps);
+            list.steps.length = 0;
+            list.steps.push(...migrated);
+        }
+        kept.push(step);
+    }
+    return kept;
+}
+
+/**
  * Whether a `break` or `stop` in this list could end the loop that contains it.
  * Nested loops are not searched: a `break` inside one binds to that loop.
  */
@@ -422,8 +433,7 @@ export function reachesEnd(steps: Step[]): boolean {
         if (step.kind === 'stop') {
             return false;
         }
-        if (step.kind === 'loop' && step.count === 'forever'
-            && step.cond.type === 'always' && !containsLoopExit(step.body)) {
+        if (step.kind === 'loop' && step.count === 'forever' && !containsLoopExit(step.body)) {
             return false;
         }
     }
@@ -432,10 +442,16 @@ export function reachesEnd(steps: Step[]): boolean {
 
 // --- serialisation ---------------------------------------------------------
 
+/** `not` that avoids stacking double negations when migrating. */
+function negate(cond: Condition): Condition {
+    return cond.type === 'not' ? cond.of : { type: 'not', of: cond };
+}
+
 /**
- * `repeat` and `while` were one loop wearing two names: a repeat is a while with
- * an `always` condition, and a while already carried an iteration cap. Fold both
- * onto the surviving `loop`.
+ * Loops have arrived at their shape in stages: first `repeat` and `while` as
+ * separate kinds, then one `loop` carrying a condition. Both fold onto a loop
+ * that only counts — the condition becomes the `if … break` it was shorthand
+ * for, which is where every other condition in a macro already lives.
  */
 function migrateLoops(steps: Step[]): Step[] {
     for (const step of steps) {
@@ -453,25 +469,39 @@ function migrateLoops(steps: Step[]): Step[] {
         legacy.then = legacy.then ? migrateLoops(legacy.then) : legacy.then;
         legacy.else = legacy.else ? migrateLoops(legacy.else) : legacy.else;
 
-        if (legacy.kind === 'repeat') {
-            legacy.kind = 'loop';
-            legacy.cond = { type: 'always' };
-            legacy.count = legacy.count ?? 'forever';
-        } else if (legacy.kind === 'while') {
-            legacy.kind = 'loop';
+        const wasRepeat = legacy.kind === 'repeat';
+        const wasWhile = legacy.kind === 'while';
+        if (!wasRepeat && !wasWhile && legacy.kind !== 'loop') {
+            continue;
+        }
+
+        legacy.kind = 'loop';
+        if (wasWhile) {
             legacy.count = legacy.maxIterations && legacy.maxIterations > 0
                 ? legacy.maxIterations
                 : 'forever';
-            legacy.cond = legacy.cond ?? { type: 'always' };
             delete legacy.maxIterations;
+        }
+        legacy.count = legacy.count ?? 'forever';
+
+        const condition = wasRepeat ? undefined : legacy.cond;
+        delete legacy.cond;
+        if (condition && condition.type !== 'always') {
+            // Leaving when the condition fails is the same as breaking as soon
+            // as it fails, checked in the same place: the top of the body.
+            legacy.body = [
+                {
+                    id: newId(),
+                    kind: 'if',
+                    cond: negate(condition),
+                    then: [{ id: newId(), kind: 'break' }],
+                    else: [],
+                },
+                ...(legacy.body ?? []),
+            ];
         }
     }
     return steps;
-}
-
-/** `not` that avoids stacking double negations when migrating. */
-function negate(cond: Condition): Condition {
-    return cond.type === 'not' ? cond.of : { type: 'not', of: cond };
 }
 
 /**
@@ -574,9 +604,11 @@ function migrateGates(steps: Step[]): Step[] {
                 migrated.push({
                     id: newId(),
                     kind: 'loop',
-                    cond: negate(cond),
                     count: 'forever',
-                    body: [{ id: newId(), kind: 'wait', ms: gate.retryMs ?? 1000, jitterMs: 0 }],
+                    body: [
+                        { id: newId(), kind: 'if', cond, then: [{ id: newId(), kind: 'break' }], else: [] },
+                        { id: newId(), kind: 'wait', ms: gate.retryMs ?? 1000, jitterMs: 0 },
+                    ],
                 });
                 break;
             case 'skip-rest':
@@ -614,7 +646,7 @@ function migrateGuards(steps: Step[]): Step[] {
             step.else = migrateGuards(step.else ?? []);
         }
 
-        if (step.kind === 'if' || step.kind === 'loop') {
+        if (step.kind === 'if') {
             step.cond = migrateCondition(step.cond) ?? { type: 'always' };
         }
 
@@ -653,7 +685,7 @@ export function parseDocument(json: string): MacroDocument {
                     loc.step.id = newId();
                 }
             });
-            fixed.body = migrateGuards(migrateGates(migrateLoops(fixed.body)));
+            fixed.body = dropRawSteps(migrateGuards(migrateGates(migrateLoops(fixed.body))));
             return fixed;
         });
         return { version: raw.version ?? DOCUMENT_VERSION, macros };
@@ -741,23 +773,12 @@ export function describeStep(step: Step): string {
         }
         case 'text':
             return `Type "${truncate(step.value)}"`;
-        case 'raw':
-            return `${step.label || 'Recorded'} (${step.events.length} events)`;
         case 'wait':
             return step.jitterMs
                 ? `Wait ${formatMs(step.ms)} ±${formatMs(step.jitterMs)}`
                 : `Wait ${formatMs(step.ms)}`;
-        case 'loop': {
-            // Named after how it reads, not how it is stored: a loop with an
-            // `always` condition is what anyone would call a repeat.
-            const forever = step.count === 'forever';
-            if (step.cond.type === 'always') {
-                return forever ? 'Repeat forever' : `Repeat ${step.count}×`;
-            }
-            return forever
-                ? `While ${describeCondition(step.cond)}`
-                : `While ${describeCondition(step.cond)}, at most ${step.count}×`;
-        }
+        case 'loop':
+            return step.count === 'forever' ? 'Repeat forever' : `Repeat ${step.count}×`;
         case 'if':
             return `If ${describeCondition(step.cond)}`;
         case 'break':
@@ -770,9 +791,8 @@ export function describeStep(step: Step): string {
 }
 
 /**
- * The kinds worth offering in an "add a step" menu. `raw` is deliberately
- * absent: it only ever comes out of verbatim recording, and adding an empty one
- * by hand produces a step that does nothing and cannot be filled in.
+ * The kinds worth offering in an "add a step" menu — which, now that verbatim
+ * recording is gone, is all of them.
  */
 export const AUTHORABLE_STEP_KINDS: StepKind[] = [
     'click', 'move', 'scroll', 'key', 'text', 'wait',
@@ -785,7 +805,6 @@ export const STEP_KIND_LABELS: Record<StepKind, string> = {
     scroll: 'Scroll',
     key: 'Key press',
     text: 'Type text',
-    raw: 'Recorded events',
     wait: 'Wait',
     loop: 'Loop',
     if: 'If / else',

@@ -133,24 +133,6 @@
             <description>Unix socket the daemon streams recorded input events on</description>
         </key>
 
-        <key name="neutralize-pointer-accel" type="b">
-            <default>true</default>
-            <summary>Flatten pointer acceleration while playing</summary>
-            <description>Temporarily set a flat mouse acceleration profile so absolute moves land exactly</description>
-        </key>
-
-        <key name="saved-accel-profile" type="s">
-            <default>''</default>
-            <summary>Saved acceleration profile</summary>
-            <description>Internal: the profile to restore after playback</description>
-        </key>
-
-        <key name="saved-pointer-speed" type="d">
-            <default>0.0</default>
-            <summary>Saved pointer speed</summary>
-            <description>Internal: the pointer speed to restore after playback</description>
-        </key>
-
         <!-- Recording -->
         <key name="record-gap-ms" type="i">
             <default>250</default>
@@ -163,12 +145,6 @@
             <default>true</default>
             <summary>Record pointer motion</summary>
             <description>Add a move step wherever the pointer comes to rest; clicks already carry their own position</description>
-        </key>
-
-        <key name="record-raw" type="b">
-            <default>false</default>
-            <summary>Record verbatim</summary>
-            <description>Store the untouched event train instead of readable steps; needed for games</description>
         </key>
 
     </schema>

@@ -14,7 +14,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { ConditionEvaluator, type EvaluationTrace } from './src/conditions.js';
 import { DaemonClient } from './src/daemon.js';
-import { MacroRunner, restorePointerAccel } from './src/runner.js';
+import { MacroRunner } from './src/runner.js';
 import { Recorder, acceleratorToEvdevCodes } from './src/recorder.js';
 import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
@@ -23,7 +23,7 @@ import {
     type Macro, type Step,
 } from './src/model.js';
 import { MacroPopup } from './ui/popup.js';
-import { pickRegion, showMarker } from './ui/overlay.js';
+import { clearMarker, pickRegion, showMarker } from './ui/overlay.js';
 
 const KEYBINDINGS = [
     'open-popup', 'run-macro', 'record-toggle', 'capture-step', 'panic-stop',
@@ -54,9 +54,6 @@ export default class ClickmateExtension extends Extension {
 
     enable(): void {
         this._settings = this.getSettings();
-
-        // If the shell died mid-playback the pointer profile is still flattened.
-        restorePointerAccel(this._settings);
 
         this._store = new MacroStore(this._settings);
         if (this._store.macros.length === 0) {
@@ -111,6 +108,7 @@ export default class ClickmateExtension extends Extension {
         }
         this._boundKeys = [];
 
+        clearMarker();
         this._recorder?.cancel();
         this._runner?.stop();
         this._recorder?.destroy();
@@ -124,11 +122,6 @@ export default class ClickmateExtension extends Extension {
         this._settingsChangedId = 0;
         this._storeUnsubscribe?.();
         this._store?.destroy();
-
-        // Never leave the desktop with a flattened pointer profile.
-        if (this._settings) {
-            restorePointerAccel(this._settings);
-        }
 
         this._runner = undefined;
         this._recorder = undefined;

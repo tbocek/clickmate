@@ -17,7 +17,7 @@ import {
     keyCode,
     keyName,
 } from './keymap.js';
-import { newId, type ClickStep, type KeyStep, type MoveStep, type RawStep, type Step, type WaitStep } from './model.js';
+import { newId, type ClickStep, type KeyStep, type MoveStep, type Step, type WaitStep } from './model.js';
 import type { Config } from './store.js';
 
 /** How long the pointer must sit still before a movement counts as finished. */
@@ -57,7 +57,6 @@ export class Recorder {
     private _pendingKeys = new Map<number, PendingKey>();
     private _pendingClick: { code: number; t: number; x: number; y: number } | null = null;
     private _motionPending = false;
-    private _rawEvents: { dt: number; type: number; code: number; value: number }[] = [];
     private _ignoredCodes = new Set<number>();
     private _settleMs = 900;
     private _motionId = 0;
@@ -211,17 +210,6 @@ export class Recorder {
         }
         this._endSession();
         this._flushMotion(true);
-        if (this._config.recordRaw && this._rawEvents.length > 0) {
-            const step: RawStep = {
-                id: newId(),
-                kind: 'raw',
-                label: `Recorded ${this._rawEvents.length} events`,
-                events: this._rawEvents,
-            };
-            this._emit(step);
-            this._rawEvents = [];
-        }
-
         const steps = this._steps;
         this._steps = [];
         this._callbacks.onStatus?.(`Recorded ${steps.length} step${steps.length === 1 ? '' : 's'}`);
@@ -248,7 +236,6 @@ export class Recorder {
         this._pendingKeys.clear();
         this._pendingClick = null;
         this._motionPending = false;
-        this._rawEvents = [];
     }
 
     private _emit(step: Step): void {
@@ -261,13 +248,6 @@ export class Recorder {
         }
         if (this._mode === 'single') {
             this._onSingleEvent(event);
-            return;
-        }
-
-        if (this._config.recordRaw) {
-            const dt = this._lastT ? Math.max(0, event.t - this._lastT) : 0;
-            this._lastT = event.t;
-            this._rawEvents.push({ dt, type: event.type, code: event.code, value: event.value });
             return;
         }
 

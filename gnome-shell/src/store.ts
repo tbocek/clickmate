@@ -20,11 +20,9 @@ export interface Config {
     llmJpegQuality: number;
     controlSocket: string;
     eventSocket: string;
-    neutralizePointerAccel: boolean;
     /** 0 means: do not turn idle gaps into wait steps. */
     recordGapMs: number;
     recordMotion: boolean;
-    recordRaw: boolean;
 }
 
 export class MacroStore {
@@ -142,10 +140,8 @@ export class MacroStore {
             llmJpegQuality: s.get_int('llm-jpeg-quality'),
             controlSocket: s.get_string('control-socket'),
             eventSocket: s.get_string('event-socket'),
-            neutralizePointerAccel: s.get_boolean('neutralize-pointer-accel'),
             recordGapMs: s.get_int('record-gap-ms'),
             recordMotion: s.get_boolean('record-motion'),
-            recordRaw: s.get_boolean('record-raw'),
         };
     }
 }

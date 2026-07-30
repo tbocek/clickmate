@@ -48,8 +48,9 @@ export interface RunnerCallbacks {
     shouldPause?: () => boolean;
 }
 
-const MOUSE_SCHEMA = 'org.gnome.desktop.peripherals.mouse';
-const MAX_MOVE_ITERATIONS = 8;
+// Without a flattened acceleration curve a move may need a few more passes;
+// each is one daemon round trip, so a higher ceiling is cheap.
+const MAX_MOVE_ITERATIONS = 12;
 const PAUSE_POLL_MS = 120;
 
 export class MacroRunner {
@@ -63,7 +64,6 @@ export class MacroRunner {
     private _cancelled = false;
     private _sleepId = 0;
     private _wakeSleep: (() => void) | null = null;
-    private _accelNeutralized = false;
     private _warnedAboutMotion = false;
     private _paused = false;
 
@@ -132,7 +132,6 @@ export class MacroRunner {
         let failure: Error | undefined;
 
         try {
-            this._neutralizePointerAccel();
             const signal = await this._runList(macro.body);
             if (this._cancelled) {
                 reason = 'stopped';
@@ -148,7 +147,6 @@ export class MacroRunner {
                 logError(error as Error, 'clickmate: macro failed');
             }
         } finally {
-            this._restorePointerAccel();
             this._running = false;
             this._callbacks.onRunningChanged?.(false);
         }
@@ -170,14 +168,12 @@ export class MacroRunner {
         this._cancelled = false;
         this._callbacks.onRunningChanged?.(true);
         try {
-            this._neutralizePointerAccel();
             await this._runStep(step);
             this._status(`Ran: ${describeStep(step)}`);
         } catch (error) {
             this._status(`Failed: ${(error as Error).message}`);
             logError(error as Error, 'clickmate: step failed');
         } finally {
-            this._restorePointerAccel();
             this._running = false;
             this._callbacks.onRunningChanged?.(false);
         }
@@ -242,9 +238,6 @@ export class MacroRunner {
             case 'text':
                 await this._doText(step);
                 return 'normal';
-            case 'raw':
-                await this._play(step.events);
-                return 'normal';
             case 'wait':
                 await this._doWait(step);
                 return 'normal';
@@ -256,22 +249,8 @@ export class MacroRunner {
                         return 'stop';
                     }
                     if (step.count !== 'forever' && iteration >= step.count) {
-                        if (step.cond.type !== 'always') {
-                            this._status(`Loop hit its ${step.count} iteration limit`);
-                        }
                         return 'normal';
                     }
-
-                    // An `always` condition is the plain counted loop, and asking
-                    // the evaluator about it every iteration is free.
-                    const proceed = await this._evaluator.evaluate(step.cond);
-                    if (this._cancelled) {
-                        return 'stop';
-                    }
-                    if (!proceed) {
-                        return 'normal';
-                    }
-
                     iteration++;
                     const signal = await this._runList(step.body);
                     if (signal === 'break') {
@@ -352,7 +331,7 @@ export class MacroRunner {
     /**
      * uinput only speaks relative motion, so walk the pointer to the target and
      * verify with global.get_pointer() after each nudge. Converges in one step
-     * with a flat acceleration profile, in a few otherwise.
+     * regardless of what the acceleration curve does to a raw delta.
      */
     private async _moveAbs(x: number, y: number): Promise<void> {
         for (let i = 0; i < MAX_MOVE_ITERATIONS; i++) {
@@ -459,63 +438,4 @@ export class MacroRunner {
             });
         });
     }
-
-    // --- pointer acceleration ---------------------------------------------
-
-    private _mouseSettings(): Gio.Settings | null {
-        try {
-            return new Gio.Settings({ schema_id: MOUSE_SCHEMA });
-        } catch (error) {
-            log(`clickmate: ${MOUSE_SCHEMA} is unavailable: ${(error as Error).message}`);
-            return null;
-        }
-    }
-
-    /**
-     * A flat profile at speed 0 makes one relative pixel equal one screen pixel,
-     * which is what lets absolute moves land on the first try. The previous
-     * values go into our own settings so a shell crash can still restore them.
-     */
-    private _neutralizePointerAccel(): void {
-        if (!this._config.neutralizePointerAccel || this._accelNeutralized) {
-            return;
-        }
-        const mouse = this._mouseSettings();
-        if (!mouse) {
-            return;
-        }
-        this._settings.set_string('saved-accel-profile', mouse.get_string('accel-profile'));
-        this._settings.set_double('saved-pointer-speed', mouse.get_double('speed'));
-        mouse.set_string('accel-profile', 'flat');
-        mouse.set_double('speed', 0.0);
-        this._accelNeutralized = true;
-    }
-
-    private _restorePointerAccel(): void {
-        if (!this._accelNeutralized) {
-            return;
-        }
-        this._accelNeutralized = false;
-        restorePointerAccel(this._settings);
-    }
-}
-
-/**
- * Put the pointer acceleration settings back. Exported so the extension can call
- * it on enable(), which recovers the desktop after a shell crash mid-playback.
- */
-export function restorePointerAccel(settings: Gio.Settings): void {
-    const profile = settings.get_string('saved-accel-profile');
-    if (!profile) {
-        return;
-    }
-    try {
-        const mouse = new Gio.Settings({ schema_id: MOUSE_SCHEMA });
-        mouse.set_string('accel-profile', profile);
-        mouse.set_double('speed', settings.get_double('saved-pointer-speed'));
-    } catch (error) {
-        log(`clickmate: could not restore pointer acceleration: ${(error as Error).message}`);
-    }
-    settings.set_string('saved-accel-profile', '');
-    settings.set_double('saved-pointer-speed', 0.0);
 }

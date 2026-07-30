@@ -18,7 +18,6 @@ globalThis.global = { get_pointer: () => [pointer[0], pointer[1], 0] };
 const BASE_CONFIG = {
     recordGapMs: 250,
     recordMotion: true,
-    recordRaw: false,
 };
 
 const EV_KEY = 1;
@@ -244,19 +243,6 @@ steps = await record([
 ]);
 check('a move back onto the clicked point is not restated',
       kinds(steps) === 'click,wait,key', kinds(steps));
-
-// --- verbatim --------------------------------------------------------------
-
-steps = await record([
-    ev(1000, EV_KEY, BTN_LEFT, 1),
-    ev(1050, EV_KEY, BTN_LEFT, 0),
-    ev(1100, EV_REL, REL_X, 7),
-], { recordRaw: true });
-check('verbatim makes one raw step', kinds(steps) === 'raw', kinds(steps));
-check('verbatim keeps every event', steps[0].events.length === 3, String(steps[0].events.length));
-check('verbatim first delta is zero', steps[0].events[0].dt === 0);
-check('verbatim deltas are microseconds', steps[0].events[1].dt === 50000, String(steps[0].events[1].dt));
-check('verbatim keeps codes', steps[0].events[2].code === REL_X && steps[0].events[2].value === 7);
 
 // --- the stop shortcut ------------------------------------------------------
 

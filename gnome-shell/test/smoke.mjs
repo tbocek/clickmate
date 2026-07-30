@@ -69,7 +69,7 @@ check('starter nested body', innerIf.then.length === 1 && innerIf.then[0].kind =
 const legacy = JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'legacy', body: [
     { id: 'a', kind: 'click', button: 'left', mode: 'abs', x: 1, y: 2,
       when: { type: 'pixel', x: 3, y: 4, color: '#fff', tolerance: 5 } },
-    { id: 'b', kind: 'loop', cond: { type: 'always' }, count: 2, body: [
+    { id: 'b', kind: 'loop', count: 2, body: [
         { id: 'c', kind: 'key', code: 'KEY_E', action: 'tap',
           when: { type: 'llm', prompt: 'ready?' } },
     ] },
@@ -94,7 +94,21 @@ check('textToEvents balanced', ev.filter(e => e.value === 1).length === ev.filte
 check('textToEvents releases shift at end', ev[ev.length - 1].value === 0 && ev[ev.length - 1].code === 42);
 
 // the add-a-step menu should only offer things you can actually author
-check('raw is not offered as a step to add', !AUTHORABLE_STEP_KINDS.includes('raw'));
+check('verbatim steps are gone entirely', !AUTHORABLE_STEP_KINDS.includes('raw')
+      && STEP_KIND_LABELS['raw'] === undefined);
+// a document from before verbatim recording was removed loses only those steps
+const rawDoc = JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'r', body: [
+    { id: 'a', kind: 'click', button: 'left', mode: 'abs', x: 1, y: 2 },
+    { id: 'b', kind: 'raw', label: 'old', events: [{ dt: 0, type: 1, code: 2, value: 1 }] },
+    { id: 'l', kind: 'loop', count: 'forever', body: [
+        { id: 'c', kind: 'raw', label: 'nested', events: [] },
+        { id: 'd', kind: 'wait', ms: 5 }] },
+] }] });
+const rawKept = parseDocument(rawDoc).macros[0].body;
+check('raw dropped at the top level', rawKept.map(s => s.kind).join(',') === 'click,loop',
+      rawKept.map(s => s.kind).join(','));
+check('raw dropped inside a loop', rawKept[1].body.map(s => s.kind).join(',') === 'wait',
+      rawKept[1].body.map(s => s.kind).join(','));
 check('every offered kind has a label',
       AUTHORABLE_STEP_KINDS.every(k => typeof STEP_KIND_LABELS[k] === 'string'));
 check('every offered kind builds something usable',
@@ -112,7 +126,7 @@ check('relative moves do not count', eqp(lastPointerEndpoint([
     { id: 'b', kind: 'move', mode: 'rel', dx: 5, dy: 5 },
 ]), { x: 1, y: 2 }));
 check('endpoint found inside a loop', eqp(lastPointerEndpoint([
-    { id: 'r', kind: 'loop', cond: { type: 'always' }, count: 'forever', body: [
+    { id: 'r', kind: 'loop', count: 'forever', body: [
         { id: 'c', kind: 'click', button: 'left', mode: 'abs', x: 7, y: 7 }] },
 ]), { x: 7, y: 7 }));
 check('keys have no endpoint', lastPointerEndpoint([
@@ -120,20 +134,19 @@ check('keys have no endpoint', lastPointerEndpoint([
 
 // reachability, so recordings are not appended somewhere unreachable
 const mk = (kind, extra = {}) => ({ id: 'x', kind, ...extra });
-const always = { type: 'always' };
-const loopStep = (extra) => ({ id: 'a', kind: 'loop', cond: always, count: 'forever', body: [], ...extra });
+const loopStep = (extra) => ({ id: 'a', kind: 'loop', count: 'forever', body: [], ...extra });
 check('plain list reaches the end', reachesEnd([mk('click'), mk('wait')]));
 check('endless loop does not', !reachesEnd([loopStep({ body: [mk('click')] })]));
 check('endless loop with a break does', reachesEnd([
     loopStep({ body: [mk('click'), { id: 'b', kind: 'break' }] })]));
 check('break inside an if still counts', reachesEnd([
     loopStep({ body: [
-        { id: 'i', kind: 'if', cond: always, then: [{ id: 'b', kind: 'break' }], else: [] }] })]));
+        { id: 'i', kind: 'if', cond: { type: 'always' }, then: [{ id: 'b', kind: 'break' }], else: [] }] })]));
 check('a break in a nested loop does not free the outer one', !reachesEnd([
     loopStep({ body: [loopStep({ id: 'n', body: [{ id: 'b', kind: 'break' }] })] })]));
 check('counted loop reaches the end', reachesEnd([loopStep({ count: 5 })]));
-check('a conditional loop reaches the end', reachesEnd([
-    loopStep({ cond: { type: 'color', x: 0, y: 0, w: 1, h: 1, color: '#fff', tolerance: 1, coverage: 1 } })]));
+check('a loop with a break reaches the end', reachesEnd([
+    loopStep({ body: [{ id: 'b', kind: 'break' }] })]));
 check('stop ends the list', !reachesEnd([mk('click'), { id: 's', kind: 'stop' }]));
 
 // coordinate field parsing
@@ -159,20 +172,26 @@ const loopDoc = JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'l', body
 ] }] });
 const loops = parseDocument(loopDoc).macros[0].body;
 check('all loops become one kind', loops.every(s => s.kind === 'loop'), JSON.stringify(loops.map(s => s.kind)));
-check('repeat forever keeps its shape', loops[0].count === 'forever' && loops[0].cond.type === 'always');
-check('repeat forever keeps its body', loops[0].body.length === 1);
-check('counted repeat keeps its count', loops[1].count === 7 && loops[1].cond.type === 'always');
-check('uncapped while becomes forever', loops[2].count === 'forever' && loops[2].cond.type === 'llm');
-check('capped while keeps its cap', loops[3].count === 4 && loops[3].cond.type === 'llm');
+check('no loop carries a condition any more', loops.every(s => s.cond === undefined));
 check('maxIterations is gone', loops[3].maxIterations === undefined);
+check('repeat forever keeps its shape', loops[0].count === 'forever' && loops[0].body.length === 1);
+check('counted repeat keeps its count', loops[1].count === 7);
+check('uncapped while becomes forever', loops[2].count === 'forever');
+check('capped while keeps its cap', loops[3].count === 4);
 check('repeat forever still reads as before', describeStep(loops[0]) === 'Repeat forever', describeStep(loops[0]));
 check('counted repeat reads naturally', describeStep(loops[1]) === 'Repeat 7×', describeStep(loops[1]));
-check('conditional loop reads as while', describeStep(loops[2]).startsWith('While '), describeStep(loops[2]));
-check('capped conditional loop says so', describeStep(loops[3]).includes('at most 4×'), describeStep(loops[3]));
+
+// a while condition becomes the `if … break` it was shorthand for
+const guardStep = loops[2].body[0];
+check('while condition became an if', guardStep?.kind === 'if', JSON.stringify(guardStep?.kind));
+check('it breaks out of the loop', guardStep?.then[0]?.kind === 'break');
+check('and it breaks when the condition fails', guardStep?.cond.type === 'not' && guardStep.cond.of.type === 'llm',
+      JSON.stringify(guardStep?.cond));
+check('the guard runs before the body', loops[2].body.length === 1);
 
 // gate steps migrate into plain control flow
 const gateDoc = (onFalse, extra = {}) => JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'g', body: [
-    { id: 'r', kind: 'loop', cond: { type: 'always' }, count: 'forever', body: [
+    { id: 'r', kind: 'loop', count: 'forever', body: [
         { id: 'g1', kind: 'gate', onFalse, ...extra, cond: { type: 'llm', prompt: 'ready?' } },
         { id: 's1', kind: 'click', button: 'left', mode: 'abs', x: 1, y: 2 },
         { id: 's2', kind: 'wait', ms: 10000 },
@@ -191,8 +210,10 @@ check('gate continue becomes if-not-continue', cont[0].then[0].kind === 'continu
 const abort = gateBody('abort');
 check('gate abort becomes if-not-stop', abort[0].then[0].kind === 'stop');
 const retryBody = parseDocument(gateDoc('retry', { retryMs: 500 })).macros[0].body[0].body;
-check('gate retry becomes a conditional loop', retryBody[0].kind === 'loop' && retryBody[0].cond.type === 'not');
-check('gate retry waits inside the loop', retryBody[0].body[0].kind === 'wait' && retryBody[0].body[0].ms === 500);
+check('gate retry becomes a loop that breaks when ready',
+      retryBody[0].kind === 'loop' && retryBody[0].body[0].kind === 'if'
+      && retryBody[0].body[0].then[0].kind === 'break');
+check('gate retry waits inside the loop', retryBody[0].body[1].kind === 'wait' && retryBody[0].body[1].ms === 500);
 
 // pixel and regionColor fold onto one colour condition
 const colDoc = JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'c', body: [
