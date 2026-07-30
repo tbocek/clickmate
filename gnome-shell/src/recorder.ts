@@ -27,7 +27,6 @@ const MOTION_SETTLE_MS = 400;
 const ENDPOINT_EPSILON = 3;
 
 export interface RecorderCallbacks {
-    onStep?: (step: Step) => void;
     onStatus?: (text: string) => void;
     onError?: (error: Error) => void;
 }
@@ -254,7 +253,6 @@ export class Recorder {
 
     private _emit(step: Step): void {
         this._steps.push(step);
-        this._callbacks.onStep?.(step);
     }
 
     private _onEvent(event: StreamedEvent): void {

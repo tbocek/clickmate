@@ -6,8 +6,8 @@ conditions that can look at the screen.
 ![Clickmate Extension Screenshot](docs/screenshot.png)
 
 A macro is a tree of steps: clicks, key presses, typed text, scrolls, waits and
-recorded event trains. Around them you can put `repeat`, `while` and `if`
-blocks, and the latter two are driven by a condition:
+recorded event trains. Around them you can put `loop` and `if` blocks, both
+driven by a condition:
 
 - **screen colour** — "the pixel at 840,512 is green ±24", or "60% of this
   40×40 area is green". Sub-5 ms, deterministic, no network.

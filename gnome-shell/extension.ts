@@ -314,59 +314,35 @@ export default class ClickmateExtension extends Extension {
         return match ? match.steps : null;
     }
 
-    private async _onCaptureRequested(): Promise<void> {
-        const raw = this._settings?.get_string('capture-step-request') ?? '';
+    /**
+     * Answer one of preferences' requests. Each arrives as serialled JSON on a
+     * `<name>-request` key; whatever the handler returns goes back on
+     * `<name>-result` carrying the same serial, which is also what makes the
+     * value differ every time — GSettings does not signal an identical write.
+     */
+    private async _answerRequest<T extends { serial?: number }>(
+        name: string,
+        handle: (request: T) => Promise<object | void> | object | void,
+    ): Promise<void> {
+        const raw = this._settings?.get_string(`${name}-request`) ?? '';
         if (!raw) {
             return;
         }
-        let request: CaptureTarget | null = null;
+
+        let request: T;
         try {
-            request = JSON.parse(raw) as CaptureTarget;
+            request = JSON.parse(raw) as T;
         } catch {
-            return;
-        }
-        if (!request) {
-            return;
+            return;   // malformed; nothing sensible to do
         }
 
-        const result = await this._captureStep(request);
-        this._settings?.set_string(
-            'capture-step-result',
-            JSON.stringify({ serial: request.serial, ...result }),
-        );
-    }
-
-    /** Flash an X (or a rectangle) where preferences is pointing. */
-    private _onMarkerRequested(): void {
-        const raw = this._settings?.get_string('show-marker-request') ?? '';
-        if (!raw) {
-            return;
+        const answer = await handle(request);
+        if (answer !== undefined) {
+            this._settings?.set_string(
+                `${name}-result`,
+                JSON.stringify({ serial: request.serial ?? 0, ...answer }),
+            );
         }
-        try {
-            const request = JSON.parse(raw) as { x: number; y: number; w?: number; h?: number };
-            if (Number.isFinite(request.x) && Number.isFinite(request.y)) {
-                showMarker(request.x, request.y, request.w, request.h);
-            }
-        } catch {
-            // Malformed request; nothing sensible to show.
-        }
-    }
-
-    /** The serial preferences stamped on a request, echoed back with the answer. */
-    private _requestSerial(key: string): number {
-        try {
-            return JSON.parse(this._settings?.get_string(key) ?? '{}').serial ?? 0;
-        } catch {
-            return 0;
-        }
-    }
-
-    private async _onRegionRequested(): Promise<void> {
-        // The serial is echoed back so the answer always differs from the last
-        // one; GSettings would not signal a repeated identical value.
-        const serial = this._requestSerial('pick-region-request');
-        const region = await pickRegion();
-        this._settings?.set_string('pick-region-result', JSON.stringify({ serial, region }));
     }
 
     private async _toggleRecording(): Promise<void> {
@@ -449,15 +425,23 @@ export default class ClickmateExtension extends Extension {
             return;
         }
         if (key === 'pick-region-request') {
-            void this._onRegionRequested();
+            void this._answerRequest('pick-region', async () => ({ region: await pickRegion() }));
             return;
         }
         if (key === 'capture-step-request') {
-            void this._onCaptureRequested();
+            void this._answerRequest<CaptureTarget>('capture-step', target => this._captureStep(target));
             return;
         }
         if (key === 'show-marker-request') {
-            this._onMarkerRequested();
+            // Purely visual: returning nothing means no answer is written back.
+            void this._answerRequest<{ serial?: number; x: number; y: number; w?: number; h?: number }>(
+                'show-marker',
+                ({ x, y, w, h }) => {
+                    if (Number.isFinite(x) && Number.isFinite(y)) {
+                        showMarker(x, y, w, h);
+                    }
+                },
+            );
             return;
         }
         if (key === 'record-toggle') {

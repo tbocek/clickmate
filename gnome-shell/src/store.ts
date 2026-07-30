@@ -7,7 +7,6 @@ import Gio from 'gi://Gio';
 import {
     Macro,
     MacroDocument,
-    emptyDocument,
     parseDocument,
     stringifyDocument,
 } from './model.js';
@@ -58,10 +57,6 @@ export class MacroStore {
         this._listeners.clear();
     }
 
-    get settings(): Gio.Settings {
-        return this._settings;
-    }
-
     get document(): MacroDocument {
         return this._doc;
     }
@@ -102,11 +97,6 @@ export class MacroStore {
 
     replaceDocument(doc: MacroDocument): void {
         this._doc = doc;
-        this.save();
-    }
-
-    reset(): void {
-        this._doc = emptyDocument();
         this.save();
     }
 

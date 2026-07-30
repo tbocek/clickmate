@@ -3,7 +3,6 @@
 
 import type { MouseButton, RawEvent } from './model.js';
 
-export const EV_SYN = 0;
 export const EV_KEY = 1;
 export const EV_REL = 2;
 
@@ -131,7 +130,7 @@ const SHIFTED: Record<string, string> = {
     '~': 'KEY_GRAVE', '<': 'KEY_COMMA', '>': 'KEY_DOT', '?': 'KEY_SLASH',
 };
 
-export interface CharKey {
+interface CharKey {
     code: number;
     shift: boolean;
 }

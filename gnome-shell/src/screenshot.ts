@@ -59,7 +59,7 @@ export async function captureScreen(): Promise<GdkPixbuf.Pixbuf> {
     return pixbufFromBytes(stream.steal_as_bytes());
 }
 
-export function stageSize(): [number, number] {
+function stageSize(): [number, number] {
     return [global.stage.width, global.stage.height];
 }
 
@@ -152,7 +152,7 @@ export function colorCoverage(pixbuf: GdkPixbuf.Pixbuf, target: Rgb, tolerance: 
 
 // --- encoding for the LLM --------------------------------------------------
 
-export function scaleToWidth(pixbuf: GdkPixbuf.Pixbuf, maxWidth: number): GdkPixbuf.Pixbuf {
+function scaleToWidth(pixbuf: GdkPixbuf.Pixbuf, maxWidth: number): GdkPixbuf.Pixbuf {
     const width = pixbuf.get_width();
     if (width <= maxWidth || maxWidth <= 0) {
         return pixbuf;

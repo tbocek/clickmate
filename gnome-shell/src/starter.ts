@@ -11,7 +11,8 @@ export function starterMacro(): Macro {
         body: [
             {
                 id: newId(),
-                kind: 'repeat',
+                kind: 'loop',
+                cond: { type: 'always' },
                 count: 'forever',
                 note: 'Check the screen, act when it says so, then wait 10 seconds.',
                 body: [

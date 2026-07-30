@@ -10,6 +10,7 @@ import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/
 
 import {
     CONDITION_TYPE_LABELS,
+    AUTHORABLE_STEP_KINDS as STEP_KINDS,
     STEP_KIND_LABELS,
     type Condition,
     type ConditionType,
@@ -17,7 +18,6 @@ import {
     type Macro,
     type Region,
     type Step,
-    type StepKind,
     childLists,
     cloneStep,
     describeCondition,
@@ -34,11 +34,6 @@ import {
     stringifyDocument,
 } from './src/model.js';
 import { MacroStore, isLoopbackEndpoint } from './src/store.js';
-
-const STEP_KINDS: StepKind[] = [
-    'click', 'move', 'scroll', 'key', 'text', 'raw', 'wait',
-    'repeat', 'while', 'if', 'break', 'continue', 'stop',
-];
 
 const CONDITION_TYPES: ConditionType[] = ['always', 'llm', 'color', 'and', 'or', 'not'];
 
@@ -611,31 +606,30 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 }));
                 break;
 
-            case 'repeat': {
+            case 'loop': {
+                rows.push(...this._buildConditionSection(_('Keep looping while'), step.cond, next => {
+                    step.cond = next;
+                    this._saveAndRebuild();
+                }, condKey));
+
                 const forever = step.count === 'forever';
-                rows.push(switchRow(_('Repeat forever'), _('Otherwise repeat a fixed number of times'), forever, value => {
-                    step.count = value ? 'forever' : 10;
-                    rebuild();
-                }));
+                rows.push(switchRow(
+                    _('No iteration limit'),
+                    _('Otherwise stop after a fixed number of times'),
+                    forever,
+                    value => {
+                        step.count = value ? 'forever' : 10;
+                        rebuild();
+                    },
+                ));
                 if (!forever) {
-                    rows.push(spinRow(_('Iterations'), step.count as number, 1, 1000000, 1, value => {
+                    rows.push(spinRow(_('Maximum iterations'), step.count as number, 1, 1000000, 1, value => {
                         step.count = Math.round(value);
                         save();
                     }));
                 }
                 break;
             }
-
-            case 'while':
-                rows.push(...this._buildConditionSection(_('Keep looping while'), step.cond, next => {
-                    step.cond = next;
-                    this._saveAndRebuild();
-                }, condKey));
-                rows.push(spinRow(_('Maximum iterations (0 = unlimited)'), step.maxIterations ?? 0, 0, 1000000, 1, value => {
-                    step.maxIterations = Math.round(value);
-                    save();
-                }));
-                break;
 
             case 'if':
                 rows.push(...this._buildConditionSection(_('Condition'), step.cond, next => {

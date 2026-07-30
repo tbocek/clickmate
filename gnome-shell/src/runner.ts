@@ -5,7 +5,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import { ConditionEvaluator, type EvaluationTrace } from './conditions.js';
+import { ConditionEvaluator } from './conditions.js';
 import { DaemonClient } from './daemon.js';
 import {
     BUTTON_CODES,
@@ -33,15 +33,12 @@ import type {
 import { describeStep } from './model.js';
 import type { Config } from './store.js';
 
-export type StepState = 'running' | 'ok' | 'skipped' | 'failed';
 export type FinishReason = 'done' | 'stopped' | 'error';
 
 type Signal = 'normal' | 'break' | 'continue' | 'stop';
 
 export interface RunnerCallbacks {
-    onStepState?: (stepId: string, state: StepState) => void;
     onStatus?: (text: string) => void;
-    onTrace?: (trace: EvaluationTrace) => void;
     onFinished?: (reason: FinishReason, error?: Error) => void;
     onRunningChanged?: (running: boolean) => void;
     /**
@@ -221,21 +218,11 @@ export class MacroRunner {
             return 'stop';
         }
         if (step.enabled === false) {
-            this._callbacks.onStepState?.(step.id, 'skipped');
             return 'normal';
         }
-
-        this._callbacks.onStepState?.(step.id, 'running');
         this._status(describeStep(step));
 
-        try {
-            const signal = await this._execute(step);
-            this._callbacks.onStepState?.(step.id, this._cancelled ? 'skipped' : 'ok');
-            return signal;
-        } catch (error) {
-            this._callbacks.onStepState?.(step.id, 'failed');
-            throw error;
-        }
+        return this._execute(step);
     }
 
     private async _execute(step: Step): Promise<Signal> {
@@ -262,15 +249,29 @@ export class MacroRunner {
                 await this._doWait(step);
                 return 'normal';
 
-            case 'repeat': {
+            case 'loop': {
                 let iteration = 0;
                 for (;;) {
                     if (this._cancelled) {
                         return 'stop';
                     }
                     if (step.count !== 'forever' && iteration >= step.count) {
+                        if (step.cond.type !== 'always') {
+                            this._status(`Loop hit its ${step.count} iteration limit`);
+                        }
                         return 'normal';
                     }
+
+                    // An `always` condition is the plain counted loop, and asking
+                    // the evaluator about it every iteration is free.
+                    const proceed = await this._evaluator.evaluate(step.cond);
+                    if (this._cancelled) {
+                        return 'stop';
+                    }
+                    if (!proceed) {
+                        return 'normal';
+                    }
+
                     iteration++;
                     const signal = await this._runList(step.body);
                     if (signal === 'break') {
@@ -281,36 +282,6 @@ export class MacroRunner {
                     }
                     // Yield to the main loop so a body with no waits in it cannot
                     // starve the compositor.
-                    await this._sleep(0);
-                }
-            }
-
-            case 'while': {
-                let iteration = 0;
-                const limit = step.maxIterations ?? 0;
-                for (;;) {
-                    if (this._cancelled) {
-                        return 'stop';
-                    }
-                    if (limit > 0 && iteration >= limit) {
-                        this._status(`While loop hit its ${limit} iteration limit`);
-                        return 'normal';
-                    }
-                    const proceed = await this._evaluator.evaluate(step.cond);
-                    if (this._cancelled) {
-                        return 'stop';
-                    }
-                    if (!proceed) {
-                        return 'normal';
-                    }
-                    iteration++;
-                    const signal = await this._runList(step.body);
-                    if (signal === 'break') {
-                        return 'normal';
-                    }
-                    if (signal === 'stop') {
-                        return 'stop';
-                    }
                     await this._sleep(0);
                 }
             }

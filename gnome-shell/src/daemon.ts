@@ -52,7 +52,6 @@ export interface DaemonStatus {
 }
 
 export interface PlayResult {
-    played: number;
     aborted: boolean;
 }
 
@@ -194,7 +193,7 @@ export class DaemonClient {
      */
     async play(events: RawEvent[]): Promise<PlayResult> {
         if (events.length === 0) {
-            return { played: 0, aborted: false };
+            return { aborted: false };
         }
         const durationMs = events.reduce((sum, e) => sum + Math.max(0, e.dt), 0) / 1000;
         const timeoutMs = Math.max(10000, durationMs + 10000);
@@ -202,7 +201,7 @@ export class DaemonClient {
         if (json.error) {
             throw new DaemonError(json.error);
         }
-        return { played: json.played ?? 0, aborted: !!json.aborted };
+        return { aborted: !!json.aborted };
     }
 
     async stop(): Promise<void> {

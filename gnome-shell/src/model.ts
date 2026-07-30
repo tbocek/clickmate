@@ -148,16 +148,16 @@ export type WaitStep = StepCommon & {
     jitterMs?: number;
 };
 
-export type RepeatStep = StepCommon & {
-    kind: 'repeat';
-    count: number | 'forever';
-    body: Step[];
-};
-
-export type WhileStep = StepCommon & {
-    kind: 'while';
+/**
+ * One loop, driven by a condition and/or a count. A plain counted loop is just
+ * this with an `always` condition, which is why there is no separate `repeat`.
+ */
+export type LoopStep = StepCommon & {
+    kind: 'loop';
+    /** Checked before every iteration. */
     cond: Condition;
-    maxIterations?: number;
+    /** Iteration cap, or 'forever' for none. */
+    count: number | 'forever';
     body: Step[];
 };
 
@@ -180,8 +180,7 @@ export type Step =
     | TextStep
     | RawStep
     | WaitStep
-    | RepeatStep
-    | WhileStep
+    | LoopStep
     | IfStep
     | FlowStep;
 
@@ -257,10 +256,8 @@ export function newStep(kind: StepKind): Step {
             return { id, kind: 'raw', label: 'Recorded', events: [] };
         case 'wait':
             return { id, kind: 'wait', ms: 1000, jitterMs: 0 };
-        case 'repeat':
-            return { id, kind: 'repeat', count: 'forever', body: [] };
-        case 'while':
-            return { id, kind: 'while', cond: newCondition('llm'), maxIterations: 0, body: [] };
+        case 'loop':
+            return { id, kind: 'loop', cond: { type: 'always' }, count: 'forever', body: [] };
         case 'if':
             return { id, kind: 'if', cond: newCondition('color'), then: [], else: [] };
         case 'break':
@@ -273,9 +270,7 @@ export function newStep(kind: StepKind): Step {
 /** The kinds that hold nested step lists, in the order the UI should show them. */
 export function childLists(step: Step): { key: string; steps: Step[] }[] {
     switch (step.kind) {
-        case 'repeat':
-            return [{ key: 'body', steps: step.body }];
-        case 'while':
+        case 'loop':
             return [{ key: 'body', steps: step.body }];
         case 'if':
             // Materialise the else branch: callers push into these arrays, and a
@@ -427,11 +422,8 @@ export function reachesEnd(steps: Step[]): boolean {
         if (step.kind === 'stop') {
             return false;
         }
-        if (step.kind === 'repeat' && step.count === 'forever' && !containsLoopExit(step.body)) {
-            return false;
-        }
-        if (step.kind === 'while' && step.cond.type === 'always'
-            && !(step.maxIterations && step.maxIterations > 0) && !containsLoopExit(step.body)) {
+        if (step.kind === 'loop' && step.count === 'forever'
+            && step.cond.type === 'always' && !containsLoopExit(step.body)) {
             return false;
         }
     }
@@ -439,6 +431,43 @@ export function reachesEnd(steps: Step[]): boolean {
 }
 
 // --- serialisation ---------------------------------------------------------
+
+/**
+ * `repeat` and `while` were one loop wearing two names: a repeat is a while with
+ * an `always` condition, and a while already carried an iteration cap. Fold both
+ * onto the surviving `loop`.
+ */
+function migrateLoops(steps: Step[]): Step[] {
+    for (const step of steps) {
+        const legacy = step as unknown as {
+            kind: string;
+            cond?: Condition;
+            count?: number | 'forever';
+            maxIterations?: number;
+            body?: Step[];
+            then?: Step[];
+            else?: Step[];
+        };
+
+        legacy.body = legacy.body ? migrateLoops(legacy.body) : legacy.body;
+        legacy.then = legacy.then ? migrateLoops(legacy.then) : legacy.then;
+        legacy.else = legacy.else ? migrateLoops(legacy.else) : legacy.else;
+
+        if (legacy.kind === 'repeat') {
+            legacy.kind = 'loop';
+            legacy.cond = { type: 'always' };
+            legacy.count = legacy.count ?? 'forever';
+        } else if (legacy.kind === 'while') {
+            legacy.kind = 'loop';
+            legacy.count = legacy.maxIterations && legacy.maxIterations > 0
+                ? legacy.maxIterations
+                : 'forever';
+            legacy.cond = legacy.cond ?? { type: 'always' };
+            delete legacy.maxIterations;
+        }
+    }
+    return steps;
+}
 
 /** `not` that avoids stacking double negations when migrating. */
 function negate(cond: Condition): Condition {
@@ -513,7 +542,7 @@ function migrateGates(steps: Step[]): Step[] {
         const step = steps[index];
 
         // Gates nest, so recurse before deciding what this step becomes.
-        if (step.kind === 'repeat' || step.kind === 'while') {
+        if (step.kind === 'loop') {
             step.body = migrateGates(step.body);
         } else if (step.kind === 'if') {
             step.then = migrateGates(step.then);
@@ -544,9 +573,9 @@ function migrateGates(steps: Step[]): Step[] {
             case 'retry':
                 migrated.push({
                     id: newId(),
-                    kind: 'while',
+                    kind: 'loop',
                     cond: negate(cond),
-                    maxIterations: 0,
+                    count: 'forever',
                     body: [{ id: newId(), kind: 'wait', ms: gate.retryMs ?? 1000, jitterMs: 0 }],
                 });
                 break;
@@ -578,14 +607,14 @@ function migrateGuards(steps: Step[]): Step[] {
     const migrated: Step[] = [];
 
     for (const step of steps) {
-        if (step.kind === 'repeat' || step.kind === 'while') {
+        if (step.kind === 'loop') {
             step.body = migrateGuards(step.body);
         } else if (step.kind === 'if') {
             step.then = migrateGuards(step.then);
             step.else = migrateGuards(step.else ?? []);
         }
 
-        if (step.kind === 'if' || step.kind === 'while') {
+        if (step.kind === 'if' || step.kind === 'loop') {
             step.cond = migrateCondition(step.cond) ?? { type: 'always' };
         }
 
@@ -624,7 +653,7 @@ export function parseDocument(json: string): MacroDocument {
                     loc.step.id = newId();
                 }
             });
-            fixed.body = migrateGuards(migrateGates(fixed.body));
+            fixed.body = migrateGuards(migrateGates(migrateLoops(fixed.body)));
             return fixed;
         });
         return { version: raw.version ?? DOCUMENT_VERSION, macros };
@@ -718,10 +747,17 @@ export function describeStep(step: Step): string {
             return step.jitterMs
                 ? `Wait ${formatMs(step.ms)} ±${formatMs(step.jitterMs)}`
                 : `Wait ${formatMs(step.ms)}`;
-        case 'repeat':
-            return step.count === 'forever' ? 'Repeat forever' : `Repeat ${step.count}×`;
-        case 'while':
-            return `While ${describeCondition(step.cond)}`;
+        case 'loop': {
+            // Named after how it reads, not how it is stored: a loop with an
+            // `always` condition is what anyone would call a repeat.
+            const forever = step.count === 'forever';
+            if (step.cond.type === 'always') {
+                return forever ? 'Repeat forever' : `Repeat ${step.count}×`;
+            }
+            return forever
+                ? `While ${describeCondition(step.cond)}`
+                : `While ${describeCondition(step.cond)}, at most ${step.count}×`;
+        }
         case 'if':
             return `If ${describeCondition(step.cond)}`;
         case 'break':
@@ -733,6 +769,16 @@ export function describeStep(step: Step): string {
     }
 }
 
+/**
+ * The kinds worth offering in an "add a step" menu. `raw` is deliberately
+ * absent: it only ever comes out of verbatim recording, and adding an empty one
+ * by hand produces a step that does nothing and cannot be filled in.
+ */
+export const AUTHORABLE_STEP_KINDS: StepKind[] = [
+    'click', 'move', 'scroll', 'key', 'text', 'wait',
+    'loop', 'if', 'break', 'continue', 'stop',
+];
+
 export const STEP_KIND_LABELS: Record<StepKind, string> = {
     click: 'Click',
     move: 'Move pointer',
@@ -741,8 +787,7 @@ export const STEP_KIND_LABELS: Record<StepKind, string> = {
     text: 'Type text',
     raw: 'Recorded events',
     wait: 'Wait',
-    repeat: 'Repeat loop',
-    while: 'While loop',
+    loop: 'Loop',
     if: 'If / else',
     break: 'Break',
     continue: 'Continue',

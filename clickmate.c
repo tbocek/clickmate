@@ -45,7 +45,6 @@ struct captured_device {
     int fdi;              // real device, grabbed (-1 for synthetic devices)
     int fdo;              // uinput clone
     pthread_t reader;
-    bool reader_started;
     bool grabbed;
     int cls;              // bitmask of CLASS_*
     int index;
@@ -1038,8 +1037,6 @@ int main(int argc, char *argv[]) {
         }
         if (pthread_create(&devices[i].reader, NULL, reader_thread, &devices[i]) != 0) {
             fprintf(stderr, "Error: Failed to start reader thread for %s\n", devices[i].path);
-        } else {
-            devices[i].reader_started = true;
         }
     }
 

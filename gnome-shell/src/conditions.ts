@@ -25,8 +25,6 @@ export interface EvaluationTrace {
     latencyMs: number;
 }
 
-export class ConditionAborted extends Error {}
-
 export class ConditionEvaluator {
     private _llm = new LlmClient();
     private _config: Config;
@@ -162,7 +160,7 @@ export class ConditionEvaluator {
             const message = error instanceof LlmError ? error.message : (error as Error).message;
             const policy = condition.onError ?? 'false';
             if (policy === 'abort') {
-                throw new ConditionAborted(`LLM check failed: ${message}`);
+                throw new Error(`LLM check failed: ${message}`);
             }
             log(`clickmate: LLM check failed (${message}); treating as ${policy}`);
             return { result: policy === 'true', detail: `error: ${message}` };
