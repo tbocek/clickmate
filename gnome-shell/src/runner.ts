@@ -44,10 +44,16 @@ export interface RunnerCallbacks {
     onTrace?: (trace: EvaluationTrace) => void;
     onFinished?: (reason: FinishReason, error?: Error) => void;
     onRunningChanged?: (running: boolean) => void;
+    /**
+     * Asked before each step. Return true to hold the run. Pull rather than
+     * push, so nothing has to be wired into the input path to answer it.
+     */
+    shouldPause?: () => boolean;
 }
 
 const MOUSE_SCHEMA = 'org.gnome.desktop.peripherals.mouse';
 const MAX_MOVE_ITERATIONS = 8;
+const PAUSE_POLL_MS = 120;
 
 export class MacroRunner {
     private _daemon: DaemonClient;
@@ -62,6 +68,7 @@ export class MacroRunner {
     private _wakeSleep: (() => void) | null = null;
     private _accelNeutralized = false;
     private _warnedAboutMotion = false;
+    private _paused = false;
 
     constructor(
         daemon: DaemonClient,
@@ -81,6 +88,32 @@ export class MacroRunner {
         return this._running;
     }
 
+    get paused(): boolean {
+        return this._paused;
+    }
+
+    /**
+     * Hold between steps for as long as the pause check says so — used while the
+     * pointer is over our own menu, so a macro cannot click its own UI. Polled
+     * rather than signalled: the alternative was making the menu actor reactive
+     * to get hover events, which swallowed the clicks meant for the menu.
+     */
+    private async _waitWhilePaused(): Promise<void> {
+        let announced = false;
+        while (!this._cancelled && this._callbacks.shouldPause?.()) {
+            if (!announced) {
+                announced = true;
+                this._paused = true;
+                this._status('Paused — pointer is over the menu');
+            }
+            await this._sleep(PAUSE_POLL_MS);
+        }
+        if (announced) {
+            this._paused = false;
+            this._status('Resumed');
+        }
+    }
+
     setConfig(config: Config): void {
         this._config = config;
     }
@@ -93,6 +126,7 @@ export class MacroRunner {
         }
         this._running = true;
         this._cancelled = false;
+        this._paused = false;
         this._warnedAboutMotion = false;
         this._callbacks.onRunningChanged?.(true);
         this._status(`Running “${macro.name}”`);
@@ -182,6 +216,10 @@ export class MacroRunner {
     }
 
     private async _runStep(step: Step): Promise<Signal> {
+        await this._waitWhilePaused();
+        if (this._cancelled) {
+            return 'stop';
+        }
         if (step.enabled === false) {
             this._callbacks.onStepState?.(step.id, 'skipped');
             return 'normal';

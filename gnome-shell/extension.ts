@@ -18,7 +18,10 @@ import { MacroRunner, restorePointerAccel } from './src/runner.js';
 import { Recorder, acceleratorToEvdevCodes } from './src/recorder.js';
 import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
-import { childLists, describeStep, findStep, type Macro, type Step } from './src/model.js';
+import {
+    childLists, describeStep, findStep, lastPointerEndpoint, reachesEnd,
+    type Macro, type Step,
+} from './src/model.js';
 import { MacroPopup } from './ui/popup.js';
 import { pickRegion, showMarker } from './ui/overlay.js';
 
@@ -45,6 +48,7 @@ export default class ClickmateExtension extends Extension {
     private _indicator?: PanelMenu.Button;
     private _icon?: St.Icon;
     private _boundKeys: string[] = [];
+    private _menuOpen = false;
     private _settingsChangedId = 0;
     private _storeUnsubscribe?: () => void;
 
@@ -67,6 +71,7 @@ export default class ClickmateExtension extends Extension {
         this._runner = new MacroRunner(this._daemon, this._evaluator, this._settings, config, {
             onStatus: text => this._onStatus(text),
             onRunningChanged: running => this._onRunningChanged(running),
+            shouldPause: () => this._isPointerOverMenu(),
             onFinished: (reason, error) => {
                 if (reason === 'error' && error) {
                     Main.notify('Clickmate', `Macro failed: ${error.message}`);
@@ -149,6 +154,7 @@ export default class ClickmateExtension extends Extension {
         this._popup = new MacroPopup({
             store: this._store!,
             isRunning: () => this._runner?.running ?? false,
+            isPaused: () => this._runner?.paused ?? false,
             isRecording: () => this._recorder?.recording ?? false,
             onEnabledChanged: enabled => {
                 if (enabled) {
@@ -166,6 +172,7 @@ export default class ClickmateExtension extends Extension {
         if (indicator.menu instanceof PopupMenu.PopupMenu) {
             this._popup.addTo(indicator.menu);
             indicator.menu.connectObject('open-state-changed', (_menu: PopupMenu.PopupMenu, isOpen: boolean) => {
+                this._menuOpen = isOpen;
                 if (isOpen) {
                     this._popup?.refresh();
                     void this._checkDaemon();
@@ -175,6 +182,25 @@ export default class ClickmateExtension extends Extension {
 
         Main.panel.addToStatusArea(this.uuid, indicator);
         this._indicator = indicator;
+    }
+
+    /**
+     * True while the menu is open and the pointer is within it. Measured against
+     * the menu's allocation rather than by listening for hover events: making the
+     * menu reactive enough to emit those intercepted the clicks meant for it.
+     */
+    private _isPointerOverMenu(): boolean {
+        if (!this._menuOpen) {
+            return false;
+        }
+        const actor = this._indicator?.menu.actor;
+        if (!actor) {
+            return false;
+        }
+        const [left, top] = actor.get_transformed_position();
+        const [width, height] = actor.get_transformed_size();
+        const [x, y] = global.get_pointer();
+        return x >= left && x <= left + width && y >= top && y <= top + height;
     }
 
     private _updateIcon(): void {
@@ -221,6 +247,8 @@ export default class ClickmateExtension extends Extension {
             return;
         }
         this._indicator?.menu.close(true);
+        // We just closed it, so the pause check must not still think otherwise.
+        this._menuOpen = false;
         void this._runner?.run(macro);
     }
 
@@ -353,10 +381,20 @@ export default class ClickmateExtension extends Extension {
 
         if (this._recorder.recording) {
             const steps = await this._recorder.stop();
+            // Appending after an endless loop would put them somewhere that never
+            // runs, which is otherwise invisible until you wonder why nothing
+            // happens.
+            const stranded = steps.length > 0 && !reachesEnd(macro.body);
             macro.body.push(...steps);
             this._store.save();
             this._updateIcon();
             this._popup?.refresh();
+            if (stranded) {
+                const warning = `Recorded ${steps.length} step${steps.length === 1 ? '' : 's'}, but ` +
+                    `“${macro.name}” never gets past its endless loop. Move them inside it in Settings.`;
+                this._popup?.setDetail(warning);
+                Main.notify('Clickmate', warning);
+            }
             return;
         }
 
@@ -370,7 +408,7 @@ export default class ClickmateExtension extends Extension {
 
         try {
             this._updateIgnoredRecordingKeys();
-            await this._recorder.start();
+            await this._recorder.start(lastPointerEndpoint(macro.body));
             Main.notify('Clickmate', `Recording into “${macro.name}”. Press the shortcut again to stop.`);
         } catch (error) {
             Main.notify('Clickmate', `Could not start recording: ${(error as Error).message}`);

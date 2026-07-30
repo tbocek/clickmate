@@ -383,6 +383,61 @@ export function cloneStep(step: Step): Step {
     return copy;
 }
 
+/**
+ * Where the pointer is left after this macro, as far as can be told statically:
+ * the last step that names an absolute position. Used when recording, so a fresh
+ * session knows where the macro already left off.
+ */
+export function lastPointerEndpoint(steps: Step[]): { x: number; y: number } | null {
+    let endpoint: { x: number; y: number } | null = null;
+    walk(steps, ({ step }) => {
+        if ((step.kind === 'click' || step.kind === 'move') && step.mode === 'abs'
+            && typeof step.x === 'number' && typeof step.y === 'number') {
+            endpoint = { x: step.x, y: step.y };
+        }
+    });
+    return endpoint;
+}
+
+/**
+ * Whether a `break` or `stop` in this list could end the loop that contains it.
+ * Nested loops are not searched: a `break` inside one binds to that loop.
+ */
+function containsLoopExit(steps: Step[]): boolean {
+    for (const step of steps) {
+        if (step.kind === 'break' || step.kind === 'stop') {
+            return true;
+        }
+        if (step.kind === 'if') {
+            if (containsLoopExit(step.then) || containsLoopExit(step.else ?? [])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Whether execution can ever reach the end of this list. False when it runs into
+ * an endless loop with no way out — which matters because anything appended
+ * after that point, a recording for instance, would never run.
+ */
+export function reachesEnd(steps: Step[]): boolean {
+    for (const step of steps) {
+        if (step.kind === 'stop') {
+            return false;
+        }
+        if (step.kind === 'repeat' && step.count === 'forever' && !containsLoopExit(step.body)) {
+            return false;
+        }
+        if (step.kind === 'while' && step.cond.type === 'always'
+            && !(step.maxIterations && step.maxIterations > 0) && !containsLoopExit(step.body)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // --- serialisation ---------------------------------------------------------
 
 /** `not` that avoids stacking double negations when migrating. */

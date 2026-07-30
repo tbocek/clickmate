@@ -79,8 +79,21 @@ make
 sudo make install
 ```
 
-`clickmate.service` captures a keyboard and a mouse by default; edit the two `-d`
-paths to match your hardware (`ls /dev/input/by-id/`). `-d` may be repeated.
+`clickmate.service` names the devices to capture. List yours with:
+
+```bash
+grep '^N: Name' /proc/bus/input/devices
+```
+
+and edit the `-n` lines to match. Names rather than paths, because anything
+paired through a wireless receiver gets no entry under `/dev/input/by-id` at all,
+and bare `/dev/input/eventN` numbers move around between boots. `-d PATH` still
+works if you prefer it. A name that matches nothing is only a warning, so an
+unplugged device does not stop the rest from being captured.
+
+**Capture every device you intend to record from.** A keyboard-with-touchpad and
+a separate mouse are two devices; if the mouse is not listed, the daemon never
+sees it and nothing it does is recorded or observed.
 
 The daemon takes an exclusive grab on those devices. The kernel drops a grab when
 the process dies, so a crash self-heals — but while changing the C code, run it
@@ -138,7 +151,19 @@ because most of it happens while the menu is closed — click the panel icon to
 read it. Everything else — macros, steps, conditions, which macro the switch
 runs — lives in the preferences window.
 
+While a macro is running, opening the menu and putting the pointer on it pauses
+the run between steps — otherwise a macro clicking at fixed coordinates could
+click its own menu. It resumes as soon as you move off the menu or close it.
+
 Build a macro by recording it (`Ctrl+Shift+R`), then open Settings to adjust it.
+Recorded steps are appended to the end of the selected macro — if that macro is
+already an endless loop, you are told so, because the new steps would sit
+somewhere that never runs.
+
+Recording always resumes from wherever the macro already leaves the pointer.
+Between two sessions the mouse gets used for other things, and moving it back to
+that spot is not a step worth keeping, so it is not recorded. Anywhere else is,
+at its true screen position — coordinates are never shifted.
 
 Next to every **Add** button there is a **Record** button that captures a single
 action, which is the quickest way to fill in coordinates: the window gets out of
@@ -170,7 +195,22 @@ curl --unix-socket /var/run/click-socket -X POST -d '{"on":true}'  http://localh
 curl --unix-socket /var/run/click-socket -X POST -d '{}'           http://localhost/stop
 ```
 
-Watching the recording stream (`socat` works too, if you have it):
+### Checking what is captured
+
+`tools/watch-events` drives the daemon on its own — no shell extension involved.
+It lists the captured devices, turns recording on, decodes the stream, and tells
+you which devices actually produced anything:
+
+```bash
+tools/watch-events 15      # watch for 15 seconds, then summarise
+tools/watch-events         # until Ctrl-C
+tools/watch-events 15 --raw
+```
+
+If a device does not appear here, nothing above the daemon can see it either —
+add it to `clickmate.service` with `-n "<its name>"`.
+
+Or by hand (`socat` works too, if you have it):
 
 ```bash
 curl --unix-socket /var/run/click-socket -X POST -d '{"on":true}' http://localhost/record

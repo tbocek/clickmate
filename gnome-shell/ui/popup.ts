@@ -10,6 +10,7 @@ import type { MacroStore } from '../src/store.js';
 export interface PopupDeps {
     store: MacroStore;
     isRunning: () => boolean;
+    isPaused: () => boolean;
     isRecording: () => boolean;
     onEnabledChanged: (enabled: boolean) => void;
     onOpenPreferences: () => void;
@@ -71,6 +72,8 @@ export class MacroPopup {
         const macro = this._deps.store.activeMacro;
         if (this._deps.isRecording()) {
             this._statusLabel.text = macro ? `Recording into “${macro.name}”` : 'Recording';
+        } else if (running && this._deps.isPaused()) {
+            this._statusLabel.text = macro ? `Paused — “${macro.name}”` : 'Paused';
         } else if (running) {
             this._statusLabel.text = macro ? `Running “${macro.name}”` : 'Running';
         } else if (!macro) {

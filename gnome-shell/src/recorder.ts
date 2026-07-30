@@ -23,6 +23,9 @@ import type { Config } from './store.js';
 /** How long the pointer must sit still before a movement counts as finished. */
 const MOTION_SETTLE_MS = 400;
 
+/** Movement smaller than this is not worth a step of its own, in pixels. */
+const ENDPOINT_EPSILON = 3;
+
 export interface RecorderCallbacks {
     onStep?: (step: Step) => void;
     onStatus?: (text: string) => void;
@@ -59,6 +62,8 @@ export class Recorder {
     private _ignoredCodes = new Set<number>();
     private _settleMs = 900;
     private _motionId = 0;
+    /** Where the macro's pointer already is, so we do not restate it. */
+    private _lastEndpoint: { x: number; y: number } | null = null;
 
     constructor(daemon: DaemonClient, config: Config, callbacks: RecorderCallbacks = {}) {
         this._daemon = daemon;
@@ -93,16 +98,25 @@ export class Recorder {
         this._reset();
         this._mode = mode;
 
-        this._stream = new EventStream(this._daemon.eventPath);
-        await this._stream.open(
-            event => this._onEvent(event),
-            error => {
-                if (error) {
-                    this._callbacks.onError?.(error);
-                }
-            },
-        );
-        await this._daemon.setRecording(true);
+        try {
+            this._stream = new EventStream(this._daemon.eventPath);
+            await this._stream.open(
+                event => this._onEvent(event),
+                error => {
+                    if (error) {
+                        this._callbacks.onError?.(error);
+                    }
+                },
+            );
+            await this._daemon.setRecording(true);
+        } catch (error) {
+            // Leaving the mode set would wedge the recorder: it would report
+            // itself busy for ever and refuse to start again.
+            this._mode = 'idle';
+            this._stream?.close();
+            this._stream = null;
+            throw error;
+        }
     }
 
     private _endSession(): void {
@@ -115,11 +129,18 @@ export class Recorder {
         });
     }
 
-    async start(): Promise<void> {
+    /**
+     * `resumeFrom` is where the macro being recorded into already leaves the
+     * pointer. Movement that merely returns there is not recorded again: between
+     * two sessions the mouse gets used for other things, and that travel is not
+     * part of the macro. Positions stay absolute and truthful either way.
+     */
+    async start(resumeFrom: { x: number; y: number } | null = null): Promise<void> {
         if (this.busy) {
             return;
         }
         await this._beginSession('macro');
+        this._lastEndpoint = resumeFrom;
         this._callbacks.onStatus?.('Recording — press the shortcut again to stop');
     }
 
@@ -221,6 +242,7 @@ export class Recorder {
     private _reset(): void {
         this._steps = [];
         this._moved = false;
+        this._lastEndpoint = null;
         this._lastT = 0;
         this._heldMods.clear();
         this._modifierCombined = false;
@@ -269,7 +291,11 @@ export class Recorder {
             return;
         }
 
-        this._insertGap(event.t);
+        // Only on the way down: the time between a press and its own release is
+        // the hold, which the step already carries, not idle time.
+        if (event.value === 1) {
+            this._insertGap(event.t);
+        }
 
         const button = buttonFromCode(event.code);
         // A click records the position it happened at, so movement that ends in
@@ -306,7 +332,10 @@ export class Recorder {
         }
     }
 
-    /** Idle gaps become explicit wait steps so playback keeps the same rhythm. */
+    /**
+     * Idle gaps become explicit wait steps so playback keeps the same rhythm.
+     * Called for presses only, so a long press is not counted twice.
+     */
     private _insertGap(t: number): void {
         if (this._config.recordGapMs <= 0 || this._lastT === 0) {
             return;
@@ -332,7 +361,20 @@ export class Recorder {
         if (!emit || !this._config.recordMotion) {
             return;
         }
-        this._emit(this._pointerStep());
+
+        const step = this._pointerStep();
+        if (this._isAtEndpoint(step.x!, step.y!)) {
+            return;   // the pointer is already where the macro left it
+        }
+        this._lastEndpoint = { x: step.x!, y: step.y! };
+        this._emit(step);
+    }
+
+    private _isAtEndpoint(x: number, y: number): boolean {
+        const endpoint = this._lastEndpoint;
+        return endpoint !== null
+            && Math.abs(endpoint.x - x) <= ENDPOINT_EPSILON
+            && Math.abs(endpoint.y - y) <= ENDPOINT_EPSILON;
     }
 
     private _onButton(event: StreamedEvent, button: NonNullable<ReturnType<typeof buttonFromCode>>): void {
@@ -348,7 +390,9 @@ export class Recorder {
             return; // release without a matching press, e.g. recording started mid-click
         }
 
-        this._emit(this._buildClick(button, pending, event.t));
+        const click = this._buildClick(button, pending, event.t);
+        this._lastEndpoint = { x: click.x!, y: click.y! };
+        this._emit(click);
     }
 
     /** The one place a press/release pair becomes a click step. */
@@ -475,32 +519,20 @@ export class Recorder {
 }
 
 /**
- * Best-effort mapping from a GTK accelerator to the evdev codes it involves, so
- * the recorder can drop its own stop shortcut.
+ * The non-modifier key of an accelerator, so the recorder can drop the keystroke
+ * that stops it.
+ *
+ * Only that one key: the modifiers are deliberately left alone. Filtering Ctrl
+ * and Shift for the whole session — because the stop shortcut happens to use
+ * them — would quietly strip the modifier off every Ctrl+C and Shift+click you
+ * recorded. The modifiers in the stop chord need no filtering anyway: they are
+ * only ever turned into a step on release, and by then recording has stopped.
  */
 export function acceleratorToEvdevCodes(accelerator: string): number[] {
-    const codes: number[] = [];
-    const text = accelerator || '';
-
-    if (/<(Control|Primary|Ctrl)>/i.test(text)) {
-        codes.push(29, 97); // KEY_LEFTCTRL, KEY_RIGHTCTRL
+    const key = (accelerator || '').replace(/<[^>]*>/g, '').trim();
+    if (!key) {
+        return [];
     }
-    if (/<Shift>/i.test(text)) {
-        codes.push(42, 54);
-    }
-    if (/<Alt>/i.test(text)) {
-        codes.push(56, 100);
-    }
-    if (/<Super>/i.test(text)) {
-        codes.push(125, 126);
-    }
-
-    const key = text.replace(/<[^>]*>/g, '').trim();
-    if (key) {
-        const code = keyCode(key);
-        if (code !== null) {
-            codes.push(code);
-        }
-    }
-    return codes;
+    const code = keyCode(key);
+    return code === null ? [] : [code];
 }

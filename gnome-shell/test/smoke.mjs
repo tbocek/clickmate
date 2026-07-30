@@ -1,7 +1,7 @@
 import {
     parseDocument, stringifyDocument, newStep, describeStep, describeCondition,
     insertStep, moveStep, removeStep, cloneStep, walk, findStep, newMacro,
-    STEP_KIND_LABELS, parseNumbers,
+    STEP_KIND_LABELS, parseNumbers, reachesEnd, lastPointerEndpoint,
 } from '../dist/src/model.js';
 import { textToEvents, keyCode, keyName, charToKey, buttonFromCode } from '../dist/src/keymap.js';
 import { starterMacro } from '../dist/src/starter.js';
@@ -91,6 +91,43 @@ const ev = textToEvents('Hi!', 0);
 // H(shift) i(unshift) !(shift) -> shift down, H down/up, shift up, i down/up, shift down, ! down/up, shift up
 check('textToEvents balanced', ev.filter(e => e.value === 1).length === ev.filter(e => e.value === 0).length, JSON.stringify(ev.length));
 check('textToEvents releases shift at end', ev[ev.length - 1].value === 0 && ev[ev.length - 1].code === 42);
+
+// where a macro leaves the pointer, so a new recording knows where it resumes
+const eqp = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+check('no endpoint in an empty macro', lastPointerEndpoint([]) === null);
+check('endpoint from the last positioned step', eqp(lastPointerEndpoint([
+    { id: 'a', kind: 'click', button: 'left', mode: 'abs', x: 1, y: 2 },
+    { id: 'b', kind: 'move', mode: 'abs', x: 9, y: 8 },
+]), { x: 9, y: 8 }));
+check('relative moves do not count', eqp(lastPointerEndpoint([
+    { id: 'a', kind: 'click', button: 'left', mode: 'abs', x: 1, y: 2 },
+    { id: 'b', kind: 'move', mode: 'rel', dx: 5, dy: 5 },
+]), { x: 1, y: 2 }));
+check('endpoint found inside a loop', eqp(lastPointerEndpoint([
+    { id: 'r', kind: 'repeat', count: 'forever', body: [
+        { id: 'c', kind: 'click', button: 'left', mode: 'abs', x: 7, y: 7 }] },
+]), { x: 7, y: 7 }));
+check('keys have no endpoint', lastPointerEndpoint([
+    { id: 'k', kind: 'key', code: 'KEY_A', action: 'tap' }]) === null);
+
+// reachability, so recordings are not appended somewhere unreachable
+const mk = (kind, extra = {}) => ({ id: 'x', kind, ...extra });
+check('plain list reaches the end', reachesEnd([mk('click'), mk('wait')]));
+check('repeat forever does not', !reachesEnd([{ id: 'a', kind: 'repeat', count: 'forever', body: [mk('click')] }]));
+check('repeat forever with a break does', reachesEnd([
+    { id: 'a', kind: 'repeat', count: 'forever', body: [mk('click'), { id: 'b', kind: 'break' }] }]));
+check('break inside an if still counts', reachesEnd([
+    { id: 'a', kind: 'repeat', count: 'forever', body: [
+        { id: 'i', kind: 'if', cond: { type: 'always' }, then: [{ id: 'b', kind: 'break' }], else: [] }] }]));
+check('a break in a nested loop does not free the outer one', !reachesEnd([
+    { id: 'a', kind: 'repeat', count: 'forever', body: [
+        { id: 'n', kind: 'repeat', count: 'forever', body: [{ id: 'b', kind: 'break' }] }] }]));
+check('counted repeat reaches the end', reachesEnd([{ id: 'a', kind: 'repeat', count: 5, body: [] }]));
+check('while always does not', !reachesEnd([
+    { id: 'a', kind: 'while', cond: { type: 'always' }, body: [] }]));
+check('while always with a limit does', reachesEnd([
+    { id: 'a', kind: 'while', cond: { type: 'always' }, maxIterations: 3, body: [] }]));
+check('stop ends the list', !reachesEnd([mk('click'), { id: 's', kind: 'stop' }]));
 
 // coordinate field parsing
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);

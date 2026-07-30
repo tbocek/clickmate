@@ -5,12 +5,15 @@ TARGET = clickmate
 CC = gcc
 CFLAGS = -Wall -O3 -lpthread -ljson-c -lmicrohttpd
 
-.PHONY: default all clean install uninstall
+.PHONY: default all clean install uninstall watch
 
 default: all
 
 all: clickmate.c
 	$(CC) $(CFLAGS) -o $(TARGET) clickmate.c
+
+watch:
+	./tools/watch-events 15
 
 clean:
 	-rm -f *.o

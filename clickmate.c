@@ -25,6 +25,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <strings.h>
+#include <limits.h>
 
 #define SOCKET_PATH       "/var/run/click-socket"
 #define EVENT_SOCKET_PATH "/var/run/clickmate-events"
@@ -788,9 +791,14 @@ static void usage(const char *path) {
     const char *basename = strrchr(path, '/');
     basename = basename ? basename + 1 : path;
 
-    fprintf(stderr, "usage: %s -d /dev/input/by-id/… [-d /dev/input/by-id/…]\n", basename);
-    fprintf(stderr, "  -d PATH\tCapture this device. May be given up to %d times.\n", MAX_DEVICES);
-    fprintf(stderr, "example: %s -d /dev/input/by-id/usb-…-event-kbd -d /dev/input/by-id/usb-…-event-mouse\n", basename);
+    fprintf(stderr, "usage: %s [-d PATH] [-n NAME] …\n", basename);
+    fprintf(stderr, "  -d PATH\tCapture the device at this path.\n");
+    fprintf(stderr, "  -n NAME\tCapture every device with this exact name (case-insensitive).\n");
+    fprintf(stderr, "         \tUse this for receiver-paired devices, which have no stable\n");
+    fprintf(stderr, "         \tpath under /dev/input/by-id. Names are listed by:\n");
+    fprintf(stderr, "         \t  grep '^N: Name' /proc/bus/input/devices\n");
+    fprintf(stderr, "  At most %d devices in total.\n", MAX_DEVICES);
+    fprintf(stderr, "example: %s -n 'Logitech K400 Plus' -d /dev/input/by-id/usb-…-event-kbd\n", basename);
 }
 
 static bool setup_device(const char *path) {
@@ -822,10 +830,79 @@ static bool setup_device(const char *path) {
         d->grabbed = true;
     }
 
-    printf("[DEBUG] Captured %s (grabbed=%d, keyboard=%d, pointer=%d)\n",
-           path, d->grabbed, (d->cls & CLASS_KEYBOARD) != 0, (d->cls & CLASS_POINTER) != 0);
+    // stderr, not stdout: the unit sends stdout to /dev/null, and what was
+    // actually captured is the first thing you want to see when a device turns
+    // out to be missing.
+    fprintf(stderr, "clickmate: captured %s%s%s%s\n",
+            path,
+            d->grabbed ? "" : " (not grabbed)",
+            (d->cls & CLASS_KEYBOARD) ? " [keys]" : "",
+            (d->cls & CLASS_POINTER) ? " [pointer]" : "");
 
     device_count++;
+    return true;
+}
+
+static int compare_paths(const void *a, const void *b) {
+    return strcmp((const char *)a, (const char *)b);
+}
+
+/**
+ * Capture every device reporting this exact name. Devices paired through a
+ * wireless receiver get no /dev/input/by-id entry, so a path is not something
+ * you can rely on for them; the name is.
+ */
+static bool setup_devices_by_name(const char *wanted) {
+    DIR *dir = opendir("/dev/input");
+    if (!dir) {
+        perror("opendir /dev/input");
+        return false;
+    }
+
+    char matches[MAX_DEVICES][PATH_MAX];
+    int match_count = 0;
+    struct dirent *entry;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "event", 5) != 0) {
+            continue;
+        }
+
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "/dev/input/%s", entry->d_name);
+
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            continue;
+        }
+
+        char name[256] = {0};
+        if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0
+            && strcasecmp(name, wanted) == 0
+            // Never grab our own clones: that would feed every event straight
+            // back into itself.
+            && strncmp(name, "Clickmate", 9) != 0
+            && match_count < MAX_DEVICES) {
+            snprintf(matches[match_count++], PATH_MAX, "%s", path);
+        }
+        close(fd);
+    }
+    closedir(dir);
+
+    if (match_count == 0) {
+        fprintf(stderr, "Warning: no input device is named \"%s\".\n", wanted);
+        fprintf(stderr, "Hint: grep '^N: Name' /proc/bus/input/devices\n");
+        return false;
+    }
+
+    // readdir order is arbitrary; sort so the device order stays predictable.
+    qsort(matches, match_count, PATH_MAX, compare_paths);
+
+    for (int i = 0; i < match_count; i++) {
+        if (!setup_device(matches[i])) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -868,17 +945,20 @@ int main(int argc, char *argv[]) {
     signal(SIGABRT, sig_handler);
 
     int opt;
-    const char *device_paths[MAX_DEVICES];
-    int path_count = 0;
+    struct { bool by_name; const char *value; } specs[MAX_DEVICES * 2];
+    int spec_count = 0;
 
-    while ((opt = getopt(argc, argv, "d:h")) != -1) {
+    while ((opt = getopt(argc, argv, "d:n:h")) != -1) {
         switch (opt) {
             case 'd':
-                if (path_count >= MAX_DEVICES) {
-                    fprintf(stderr, "Error: at most %d devices are supported.\n", MAX_DEVICES);
+            case 'n':
+                if (spec_count >= (int)(sizeof(specs) / sizeof(specs[0]))) {
+                    fprintf(stderr, "Error: too many devices requested.\n");
                     return EXIT_FAILURE;
                 }
-                device_paths[path_count++] = optarg;
+                specs[spec_count].by_name = (opt == 'n');
+                specs[spec_count].value = optarg;
+                spec_count++;
                 break;
             case 'h':
                 usage(argv[0]);
@@ -889,18 +969,27 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (path_count == 0) {
+    if (spec_count == 0) {
         usage(argv[0]);
-        fprintf(stderr, "Error: Input device not specified.\n");
-        fprintf(stderr, "Hint: Provide a valid input device, typically found under /dev/input/by-id/...\n");
+        fprintf(stderr, "Error: no input device specified.\n");
         return EXIT_FAILURE;
     }
 
-    for (int i = 0; i < path_count; i++) {
-        if (!setup_device(device_paths[i])) {
+    // A name that matches nothing is a warning, not a failure: an unplugged
+    // mouse should not stop the keyboard from being captured.
+    for (int i = 0; i < spec_count; i++) {
+        bool ok = specs[i].by_name
+            ? setup_devices_by_name(specs[i].value)
+            : setup_device(specs[i].value);
+        if (!ok && !specs[i].by_name) {
             release_devices();
             return EXIT_FAILURE;
         }
+    }
+
+    if (device_count == 0) {
+        fprintf(stderr, "Error: none of the requested devices could be captured.\n");
+        return EXIT_FAILURE;
     }
 
     if (!ensure_class(CLASS_KEYBOARD, "Clickmate Virtual Keyboard") ||
