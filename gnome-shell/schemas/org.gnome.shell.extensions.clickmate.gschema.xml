@@ -1,10 +1,160 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
     <schema id="org.gnome.shell.extensions.clickmate" path="/org/gnome/shell/extensions/clickmate/">
+
+        <!-- The whole macro document, serialised as JSON. Shared between the
+             shell process and the preferences process; both watch for changes. -->
+        <key name="macros" type="s">
+            <default>''</default>
+            <summary>Macro document</summary>
+            <description>All macros, steps and conditions, serialised as JSON</description>
+        </key>
+
+        <key name="active-macro-id" type="s">
+            <default>''</default>
+            <summary>Selected macro</summary>
+            <description>Id of the macro the popup and shortcuts act on</description>
+        </key>
+
+        <!-- Shortcuts -->
+        <key name="open-popup" type="as">
+            <default><![CDATA[['<Control><Shift>F5']]]></default>
+            <summary>Open the macro popup</summary>
+            <description>Keyboard shortcut that opens the clickmate popup</description>
+        </key>
+
+        <key name="run-macro" type="as">
+            <default><![CDATA[['<Control><Shift>F6']]]></default>
+            <summary>Run or stop the selected macro</summary>
+            <description>Keyboard shortcut that toggles playback of the selected macro</description>
+        </key>
+
+        <key name="record-toggle" type="as">
+            <default><![CDATA[['<Control><Shift>R']]]></default>
+            <summary>Start or stop recording</summary>
+            <description>Keyboard shortcut that toggles recording into the selected macro</description>
+        </key>
+
+        <key name="pick-point" type="as">
+            <default><![CDATA[['<Control><Shift>P']]]></default>
+            <summary>Pick a screen coordinate</summary>
+            <description>Capture the pointer position for use as a click target or pixel check</description>
+        </key>
+
+        <key name="panic-stop" type="as">
+            <default><![CDATA[['<Super>Escape']]]></default>
+            <summary>Emergency stop</summary>
+            <description>Abort any running macro and release every held key</description>
+        </key>
+
         <key name="toggle-autoclicker" type="as">
             <default><![CDATA[['<Control><Shift>F5']]]></default>
-            <summary>Toggle autoclicker</summary>
-            <description>Keyboard shortcut to toggle the autoclicker</description>
+            <summary>Deprecated autoclicker toggle</summary>
+            <description>Kept so existing configurations keep loading; use run-macro instead</description>
         </key>
+
+        <!-- Local LLM -->
+        <key name="llm-endpoint" type="s">
+            <default>'http://localhost:11434/v1/chat/completions'</default>
+            <summary>Chat completions endpoint</summary>
+            <description>OpenAI-compatible endpoint used for screenshot questions</description>
+        </key>
+
+        <key name="llm-model" type="s">
+            <default>'qwen2.5vl:7b'</default>
+            <summary>Vision model name</summary>
+            <description>Model identifier passed to the endpoint</description>
+        </key>
+
+        <key name="llm-api-key" type="s">
+            <default>''</default>
+            <summary>API key</summary>
+            <description>Sent as a bearer token when set; usually empty for local servers</description>
+        </key>
+
+        <key name="llm-timeout-ms" type="i">
+            <default>20000</default>
+            <range min="1000" max="300000"/>
+            <summary>Request timeout</summary>
+            <description>How long to wait for the model before giving up, in milliseconds</description>
+        </key>
+
+        <key name="llm-max-width" type="i">
+            <default>1024</default>
+            <range min="128" max="4096"/>
+            <summary>Maximum image width</summary>
+            <description>Screenshots are scaled down to this width before being sent</description>
+        </key>
+
+        <key name="llm-jpeg-quality" type="i">
+            <default>80</default>
+            <range min="30" max="100"/>
+            <summary>JPEG quality</summary>
+            <description>Quality of the screenshot encoding sent to the model</description>
+        </key>
+
+        <!-- Daemon -->
+        <key name="control-socket" type="s">
+            <default>'/var/run/click-socket'</default>
+            <summary>Daemon control socket</summary>
+            <description>Unix socket the daemon serves its JSON API on</description>
+        </key>
+
+        <key name="event-socket" type="s">
+            <default>'/var/run/clickmate-events'</default>
+            <summary>Daemon event socket</summary>
+            <description>Unix socket the daemon streams recorded input events on</description>
+        </key>
+
+        <key name="neutralize-pointer-accel" type="b">
+            <default>true</default>
+            <summary>Flatten pointer acceleration while playing</summary>
+            <description>Temporarily set a flat mouse acceleration profile so absolute moves land exactly</description>
+        </key>
+
+        <key name="saved-accel-profile" type="s">
+            <default>''</default>
+            <summary>Saved acceleration profile</summary>
+            <description>Internal: the profile to restore after playback</description>
+        </key>
+
+        <key name="saved-pointer-speed" type="d">
+            <default>0.0</default>
+            <summary>Saved pointer speed</summary>
+            <description>Internal: the pointer speed to restore after playback</description>
+        </key>
+
+        <!-- Recording -->
+        <key name="record-delays" type="b">
+            <default>true</default>
+            <summary>Record pauses</summary>
+            <description>Insert wait steps for idle gaps while recording</description>
+        </key>
+
+        <key name="record-gap-ms" type="i">
+            <default>250</default>
+            <range min="20" max="60000"/>
+            <summary>Pause threshold</summary>
+            <description>Idle gaps longer than this become wait steps</description>
+        </key>
+
+        <key name="record-motion" type="b">
+            <default>false</default>
+            <summary>Record pointer motion</summary>
+            <description>Record intermediate pointer movement instead of only click positions</description>
+        </key>
+
+        <key name="record-raw" type="b">
+            <default>false</default>
+            <summary>Record verbatim</summary>
+            <description>Store the untouched event train instead of readable steps; needed for games</description>
+        </key>
+
+        <key name="log-level" type="s">
+            <default>'info'</default>
+            <summary>Log level</summary>
+            <description>One of error, warn, info, debug</description>
+        </key>
+
     </schema>
 </schemalist>

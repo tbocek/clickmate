@@ -12,6 +12,8 @@
   },
   "include": [
     "ambient.d.ts",
+    "src/**/*.ts",
+    "ui/**/*.ts",
   ],
   "files": [
     "extension.ts",

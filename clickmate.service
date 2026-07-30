@@ -1,12 +1,17 @@
 [Unit]
-Description=Clickmate Autoclicker
+Description=Clickmate input service (macro recording and playback)
 Wants=graphical.target
 ConditionPathExists=/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse
+ConditionPathExists=/dev/input/by-id/usb-Logitech_HID_compliant_keyboard-event-kbd
 
 [Install]
 WantedBy=graphical.target
 
 [Service]
-ExecStart=/usr/local/bin/clickmate -d /dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse
+ExecStart=/usr/local/bin/clickmate \
+  -d /dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse \
+  -d /dev/input/by-id/usb-Logitech_HID_compliant_keyboard-event-kbd
+Restart=on-failure
+RestartSec=2
 StandardOutput=null
 StandardError=journal
