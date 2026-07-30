@@ -1,250 +1,378 @@
+// Clickmate: record, edit and replay input macros with optional screen-aware
+// conditions. The shell side owns all control flow; the daemon only injects and
+// observes evdev events.
+
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
-import { PopupSwitchMenuItem, PopupMenu, PopupMenuItem } from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-interface ClickerStatus {
-    status: 'on' | 'off';
-}
+import { ConditionEvaluator, type EvaluationTrace } from './src/conditions.js';
+import { DaemonClient } from './src/daemon.js';
+import { MacroRunner, restorePointerAccel, type StepState } from './src/runner.js';
+import { Recorder, acceleratorToEvdevCodes } from './src/recorder.js';
+import { MacroStore, type Config } from './src/store.js';
+import { starterMacro } from './src/starter.js';
+import type { Condition, Region, Step } from './src/model.js';
+import { MacroPopup } from './ui/popup.js';
+import { RunHud, pickRegion } from './ui/overlay.js';
 
-interface ClickerLabels {
-    ENABLE_BUTTON: string;
-    TOGGLE_ACTIVE: string;
-    ERROR_CONNECTION: string;
-}
+const KEYBINDINGS = ['open-popup', 'run-macro', 'record-toggle', 'pick-point', 'panic-stop'];
 
-const DEFAULT_LABELS: ClickerLabels = {
-    ENABLE_BUTTON: 'Enable Autoclicker',
-    TOGGLE_ACTIVE: 'Auto-click active',
-    ERROR_CONNECTION: 'Could not connect to click-socket'
-};
+export default class ClickmateExtension extends Extension {
+    private _settings?: Gio.Settings;
+    private _store?: MacroStore;
+    private _daemon?: DaemonClient;
+    private _evaluator?: ConditionEvaluator;
+    private _runner?: MacroRunner;
+    private _recorder?: Recorder;
+    private _popup?: MacroPopup;
+    private _hud?: RunHud;
+    private _indicator?: PanelMenu.Button;
+    private _icon?: St.Icon;
+    private _boundKeys: string[] = [];
+    private _settingsChangedId = 0;
+    private _storeUnsubscribe?: () => void;
 
-export default class MyExtension extends Extension {
+    enable(): void {
+        this._settings = this.getSettings();
 
-    _indicator: PanelMenu.Button | null | undefined;
-    _toggleItem: PopupSwitchMenuItem | null | undefined;
-    _keybindingId: number | null = null;
-    _statusLabel: St.Label | null = null;
-    _isUpdatingToggle: boolean = false;
+        // If the shell died mid-playback the pointer profile is still flattened.
+        restorePointerAccel(this._settings);
 
-    async checkClickerStatus(): Promise<ClickerStatus | null> {
-        try {
-            const client = new Gio.SocketClient();
-            //TODO: async seems not to work
-            const connection = client.connect(new Gio.UnixSocketAddress({ path: '/var/run/click-socket' }), null);
-
-            // Send a simple HTTP GET request
-            const httpRequest = [
-                'GET / HTTP/1.1',
-                'Host: localhost',
-                'Connection: close',
-                '',
-                ''
-            ].join('\r\n');
-
-            // Write to socket
-            const outputStream = connection.get_output_stream();
-            outputStream.write_all(httpRequest, null);
-
-            // Read response
-            const inputStream = connection.get_input_stream();
-            const dataInputStream = new Gio.DataInputStream({ base_stream: inputStream });
-
-
-            // Skip HTTP headers
-            let line;
-            while ((line = dataInputStream.read_line(null)[0])) {
-                if (line.length === 0 || line.toString().trim() === "") break;
-            }
-
-            // Read JSON response
-            const response = dataInputStream.read_line(null)[0];
-            if (response) {
-                return JSON.parse(response.toString()) as ClickerStatus;
-            }
-            return null;
-        } catch (error) {
-            log(`Error checking clicker status: ${error}`);
-            return null;
+        this._store = new MacroStore(this._settings);
+        if (this._store.macros.length === 0) {
+            const macro = starterMacro();
+            this._store.addMacro(macro);
+            this._store.activeMacroId = macro.id;
         }
+
+        const config = this._store.config;
+        this._daemon = new DaemonClient(config.controlSocket, config.eventSocket);
+        this._evaluator = new ConditionEvaluator(config, trace => this._onTrace(trace));
+        this._runner = new MacroRunner(this._daemon, this._evaluator, this._settings, config, {
+            onStepState: (id, state) => this._onStepState(id, state),
+            onStatus: text => this._onStatus(text),
+            onRunningChanged: running => this._onRunningChanged(running),
+            onFinished: (reason, error) => {
+                if (reason === 'error' && error) {
+                    Main.notify('Clickmate', `Macro failed: ${error.message}`);
+                }
+            },
+        });
+        this._recorder = new Recorder(this._daemon, config, {
+            onStatus: text => this._onStatus(text),
+            onError: error => Main.notify('Clickmate', `Recording stopped: ${error.message}`),
+        });
+
+        this._buildIndicator();
+        this._hud = new RunHud(() => this._runner?.stop());
+
+        this._storeUnsubscribe = this._store.onChanged(() => this._popup?.refresh());
+        this._settingsChangedId = this._settings.connect('changed', (_settings, key) => {
+            this._onSettingChanged(key);
+        });
+
+        for (const name of KEYBINDINGS) {
+            Main.wm.addKeybinding(
+                name,
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.ALL,
+                () => this._onShortcut(name),
+            );
+            this._boundKeys.push(name);
+        }
+
+        this._updateIgnoredRecordingKeys();
+        this._popup?.refresh();
     }
 
-    async setClickerStatus(enabled: boolean): Promise<boolean> {
-        try {
-            const client = new Gio.SocketClient();
-            const connection = client.connect(new Gio.UnixSocketAddress({ path: '/var/run/click-socket' }), null);
-
-            const data = JSON.stringify({ status: enabled ? 'on' : 'off' });
-
-            // Send HTTP POST request
-            const httpRequest = [
-                'POST / HTTP/1.1',
-                'Host: localhost',
-                'Connection: close',
-                'Content-Type: application/json',
-                `Content-Length: ${data.length}`,
-                '',
-                data
-            ].join('\r\n');
-
-            // Write to socket
-            const outputStream = connection.get_output_stream();
-            outputStream.write_all(httpRequest, null);
-
-            // Read response
-            const inputStream = connection.get_input_stream();
-            const dataInputStream = new Gio.DataInputStream({ base_stream: inputStream });
-
-            // Skip HTTP headers
-            let line;
-            while ((line = dataInputStream.read_line(null)[0])) {
-                if (line.length === 0 || line.toString().trim() === "") break;
-            }
-
-            // Read JSON response
-            const response = dataInputStream.read_line(null)[0];
-            if (response) {
-                const status = JSON.parse(response.toString()) as ClickerStatus;
-                return status.status === (enabled ? 'on' : 'off');
-            }
-            return false;
-        } catch (error) {
-            log(`Error setting clicker status: ${error}`);
-            return false;
+    disable(): void {
+        for (const name of this._boundKeys) {
+            Main.wm.removeKeybinding(name);
         }
+        this._boundKeys = [];
+
+        this._runner?.stop();
+        this._recorder?.destroy();
+        this._evaluator?.destroy();
+        this._hud?.destroy();
+        this._popup?.destroy();
+        this._indicator?.destroy();
+
+        if (this._settings && this._settingsChangedId) {
+            this._settings.disconnect(this._settingsChangedId);
+        }
+        this._settingsChangedId = 0;
+        this._storeUnsubscribe?.();
+        this._store?.destroy();
+
+        // Never leave the desktop with a flattened pointer profile.
+        if (this._settings) {
+            restorePointerAccel(this._settings);
+        }
+
+        this._runner = undefined;
+        this._recorder = undefined;
+        this._evaluator = undefined;
+        this._daemon = undefined;
+        this._store = undefined;
+        this._popup = undefined;
+        this._hud = undefined;
+        this._indicator = undefined;
+        this._icon = undefined;
+        this._settings = undefined;
     }
 
-    updateStatusLabel(error: boolean = false) {
-        if (!this._statusLabel) {
-            return;
-        }
+    // --- UI ----------------------------------------------------------------
 
-        if (error) {
-            this._statusLabel.text = 'Could not connect to click-socket';
-            this._statusLabel.add_style_class_name('error-label');
-        } else {
-            this._statusLabel.remove_style_class_name('error-label');
-            this._statusLabel.style_class = 'status-label';
-        }
-    }
-
-    async enable() {
-
-        // Create a panel button
-        this._indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
-
-        // Add an icon
-        const icon = new St.Icon({
+    private _buildIndicator(): void {
+        const indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
+        this._icon = new St.Icon({
             icon_name: 'input-mouse-symbolic',
             style_class: 'system-status-icon',
         });
-        this._indicator.add_child(icon);
+        indicator.add_child(this._icon);
 
-        // Create a menu item for enabling autoclicker
-        this._toggleItem = new PopupSwitchMenuItem('Enable Autoclicker', false);
-        this._toggleItem.connect('toggled', async (item) => {
-            if (this._isUpdatingToggle) return;
-            const prevState = !item.state;
-            const success = await this.setClickerStatus(item.state);
-            if (!success) {
-                this._isUpdatingToggle = true;
-                item.setToggleState(prevState);
-                this._isUpdatingToggle = false;
-                this.updateStatusLabel(true);
-            } else {
-                this._isUpdatingToggle = true;
-                item.setToggleState(item.state);
-                this._isUpdatingToggle = false;
-                this.updateStatusLabel(false);
-            }
-
-            // Play sound after state change
-            this.playSound();
+        this._popup = new MacroPopup({
+            store: this._store!,
+            isRunning: () => this._runner?.running ?? false,
+            isRecording: () => this._recorder?.recording ?? false,
+            onRun: () => this._runActiveMacro(),
+            onStop: () => this._runner?.stop(),
+            onToggleRecord: () => void this._toggleRecording(),
+            onRunStep: step => void this._runSingleStep(step),
+            onTestCondition: condition => void this._testCondition(condition),
+            onPickRegion: apply => void this._pickRegion(apply),
+            onOpenPreferences: () => {
+                this._indicator?.menu.close(true);
+                this.openPreferences();
+            },
         });
 
-        // Create status label
-        this._statusLabel = new St.Label({
-            text: '',
-            style_class: 'status-label'
-        });
-
-        // Add the menu item to the indicator
-        if (this._indicator.menu instanceof PopupMenu) {
-
-            // Connect to menu open event to refresh status
-            this._indicator.menu.connectObject('open-state-changed', async (_menu: PopupMenu, isOpen: boolean) => {
+        if (indicator.menu instanceof PopupMenu.PopupMenu) {
+            this._popup.addTo(indicator.menu);
+            indicator.menu.connectObject('open-state-changed', (_menu: PopupMenu.PopupMenu, isOpen: boolean) => {
                 if (isOpen) {
-                    const status = await this.checkClickerStatus();
-                    if (status && this._toggleItem) {
-                        this._isUpdatingToggle = true;
-                        this._toggleItem.setToggleState(status.status === 'on');
-                        this._isUpdatingToggle = false;
-                        this.updateStatusLabel(false);
-                    } else {
-                        this.updateStatusLabel(true);
-                    }
+                    this._popup?.refresh();
+                    void this._checkDaemon();
                 }
             }, this);
-
-            this._indicator.menu.addMenuItem(this._toggleItem);
-
-            // Add status label in a menu item
-            const statusItem = new PopupMenuItem('');
-            statusItem.actor.add_child(this._statusLabel);
-            this._indicator.menu.addMenuItem(statusItem);
         }
 
-        // Register the keyboard shortcut
-        Main.wm.addKeybinding(
-            'toggle-autoclicker',
-            this.getSettings(), // Your extension's settings
-            Meta.KeyBindingFlags.NONE,
-            Shell.ActionMode.ALL,
-            () => this.toggleAutoclicker()
-        );
+        Main.panel.addToStatusArea(this.uuid, indicator);
+        this._indicator = indicator;
+    }
 
-        // Add the indicator to the panel
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
-
-        const status = await this.checkClickerStatus();
-        if (status) {
-            if (this._toggleItem) {
-                this._toggleItem.setToggleState(status.status === 'on');
-            }
-            this.updateStatusLabel(false);
+    private _updateIcon(): void {
+        if (!this._icon) {
+            return;
+        }
+        if (this._recorder?.recording) {
+            this._icon.icon_name = 'media-record-symbolic';
+            this._icon.add_style_class_name('clickmate-recording');
+        } else if (this._runner?.running) {
+            this._icon.icon_name = 'media-playback-start-symbolic';
+            this._icon.remove_style_class_name('clickmate-recording');
         } else {
-            this.updateStatusLabel(true);
+            this._icon.icon_name = 'input-mouse-symbolic';
+            this._icon.remove_style_class_name('clickmate-recording');
         }
     }
 
-    async toggleAutoclicker() {
-        if (this._toggleItem) {
-            const newState = !this._toggleItem.state;
-            this._toggleItem.setToggleState(newState);
+    private _onStatus(text: string): void {
+        this._popup?.setStatus(text);
+        this._hud?.setStatus(text);
+    }
+
+    private _onTrace(trace: EvaluationTrace): void {
+        const text = `${trace.condition} → ${trace.result ? 'yes' : 'no'}${trace.detail ? ` (${trace.detail})` : ''}`;
+        this._popup?.setDetail(text);
+        this._hud?.setDetail(text);
+    }
+
+    private _onStepState(id: string, state: StepState): void {
+        this._popup?.setStepState(id, state);
+    }
+
+    private _onRunningChanged(running: boolean): void {
+        this._updateIcon();
+        this._popup?.refresh();
+        if (running) {
+            this._hud?.show();
+        } else {
+            this._hud?.hide();
         }
     }
 
-    playSound() {
-        global.display.get_sound_player().play_from_theme(
-            'dialog-information',  // You can also use 'bell', 'button-toggle-on', etc.
-            'Autoclicker Toggle',
-            null
-        );
+    // --- actions -----------------------------------------------------------
+
+    private _runActiveMacro(): void {
+        const macro = this._store?.activeMacro;
+        if (!macro) {
+            Main.notify('Clickmate', 'No macro selected.');
+            return;
+        }
+        if (this._runner?.running) {
+            this._runner.stop();
+            return;
+        }
+        this._popup?.clearStepStates();
+        this._indicator?.menu.close(true);
+        void this._runner?.run(macro);
     }
 
-    disable() {
-        // Remove the keyboard shortcut
-        if (this._keybindingId !== null) {
-            Main.wm.removeKeybinding('toggle-autoclicker');
+    private async _runSingleStep(step: Step): Promise<void> {
+        if (!this._runner || this._runner.running) {
+            return;
+        }
+        this._indicator?.menu.close(true);
+        await this._runner.runSingle(step);
+    }
+
+    private async _testCondition(condition: Condition): Promise<void> {
+        if (!this._evaluator) {
+            return;
+        }
+        this._onStatus('Testing condition…');
+        try {
+            // Trace output already lands in the detail line via _onTrace.
+            await this._evaluator.evaluate(condition);
+        } catch (error) {
+            this._popup?.setDetail(`Test failed: ${(error as Error).message}`);
+        }
+    }
+
+    private async _pickRegion(apply: (region: Region) => void): Promise<void> {
+        this._indicator?.menu.close(true);
+        const region = await pickRegion();
+        if (region) {
+            apply(region);
+        }
+        this._indicator?.menu.open(true);
+    }
+
+    private async _toggleRecording(): Promise<void> {
+        if (!this._recorder || !this._store) {
+            return;
+        }
+        const macro = this._store.activeMacro;
+        if (!macro) {
+            Main.notify('Clickmate', 'Create a macro before recording.');
+            return;
         }
 
-        this._indicator?.destroy();
-        this._indicator = null;
-        this._toggleItem = null;
+        if (this._recorder.recording) {
+            const steps = await this._recorder.stop();
+            macro.body.push(...steps);
+            this._store.save();
+            this._updateIcon();
+            this._popup?.refresh();
+            return;
+        }
+
+        if (this._runner?.running) {
+            this._runner.stop();
+        }
+
+        // An open shell menu holds the keyboard grab, which would stop you from
+        // driving the app you are recording against.
+        this._indicator?.menu.close(true);
+
+        try {
+            this._updateIgnoredRecordingKeys();
+            await this._recorder.start();
+            Main.notify('Clickmate', `Recording into “${macro.name}”. Press the shortcut again to stop.`);
+        } catch (error) {
+            Main.notify('Clickmate', `Could not start recording: ${(error as Error).message}`);
+        }
+        this._updateIcon();
+    }
+
+    private _pickPoint(): void {
+        const [x, y] = global.get_pointer();
+        const px = Math.round(x);
+        const py = Math.round(y);
+        const applied = this._popup?.applyPickedPoint(px, py);
+        Main.notify('Clickmate', applied ?? `Pointer is at ${px},${py}`);
+    }
+
+    private _onShortcut(name: string): void {
+        switch (name) {
+            case 'open-popup':
+                this._indicator?.menu.toggle();
+                break;
+            case 'run-macro':
+                this._runActiveMacro();
+                break;
+            case 'record-toggle':
+                void this._toggleRecording();
+                break;
+            case 'pick-point':
+                this._pickPoint();
+                break;
+            case 'panic-stop':
+                this._runner?.stop();
+                if (this._recorder?.recording) {
+                    void this._recorder.stop();
+                }
+                this._updateIcon();
+                break;
+        }
+    }
+
+    // --- configuration -----------------------------------------------------
+
+    private _onSettingChanged(key: string): void {
+        if (key === 'macros' || key === 'active-macro-id') {
+            this._popup?.refresh();
+            return;
+        }
+        if (key === 'record-toggle') {
+            this._updateIgnoredRecordingKeys();
+            return;
+        }
+        if (key.startsWith('saved-')) {
+            return;
+        }
+
+        const config: Config | undefined = this._store?.config;
+        if (!config) {
+            return;
+        }
+        this._daemon?.setPaths(config.controlSocket, config.eventSocket);
+        this._evaluator?.setConfig(config);
+        this._evaluator?.clearCache();
+        this._runner?.setConfig(config);
+        this._recorder?.setConfig(config);
+    }
+
+    /** Keep the stop-recording chord out of the recording itself. */
+    private _updateIgnoredRecordingKeys(): void {
+        const accelerators = this._settings?.get_strv('record-toggle') ?? [];
+        const codes = accelerators.flatMap(acceleratorToEvdevCodes);
+        this._recorder?.setIgnoredCodes(codes);
+    }
+
+    private async _checkDaemon(): Promise<void> {
+        if (!this._daemon) {
+            return;
+        }
+        try {
+            const status = await this._daemon.status();
+            if (status.version < 2) {
+                this._popup?.setDetail('The clickmate daemon is out of date — run sudo make install.');
+            } else if (status.devices.length === 0) {
+                this._popup?.setDetail('The daemon has no capture devices.');
+            }
+        } catch (error) {
+            this._popup?.setDetail(`Cannot reach the daemon at ${this._daemon.controlPath}`);
+        }
     }
 }

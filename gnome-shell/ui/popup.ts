@@ -192,6 +192,40 @@ export class MacroPopup {
         this._detailLabel.visible = text !== '';
     }
 
+    /**
+     * Apply a picked screen coordinate to whatever is selected. Returns a
+     * description of what changed, or null when nothing could take it.
+     */
+    applyPickedPoint(x: number, y: number): string | null {
+        const macro = this._deps.store.activeMacro;
+        if (!macro || !this._selectedId) {
+            return null;
+        }
+        const step = this._findStep(macro, this._selectedId);
+        if (!step) {
+            return null;
+        }
+
+        if (step.kind === 'click' || step.kind === 'move') {
+            step.x = x;
+            step.y = y;
+            step.mode = 'abs';
+            this._deps.store.save();
+            this.refresh();
+            return `${STEP_KIND_LABELS[step.kind]} target set to ${x},${y}`;
+        }
+
+        if (step.when?.type === 'pixel') {
+            step.when.x = x;
+            step.when.y = y;
+            this._deps.store.save();
+            this.refresh();
+            return `Pixel check moved to ${x},${y}`;
+        }
+
+        return null;
+    }
+
     setStepState(stepId: string, state: StepState): void {
         this._stepStates.set(stepId, state);
         const row = this._rowsById.get(stepId);
