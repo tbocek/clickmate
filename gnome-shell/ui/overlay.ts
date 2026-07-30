@@ -1,6 +1,7 @@
 // On-screen chrome: the run HUD and the drag-to-select region picker.
 
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
 import St from 'gi://St';
 import Shell from 'gi://Shell';
 
@@ -86,6 +87,74 @@ export class RunHud {
         this.hide();
         this._box.destroy();
     }
+}
+
+let markerTimeoutId = 0;
+let markerActor: St.Widget | null = null;
+
+function removeMarker(): void {
+    if (markerTimeoutId) {
+        GLib.source_remove(markerTimeoutId);
+        markerTimeoutId = 0;
+    }
+    if (markerActor) {
+        Main.layoutManager.removeChrome(markerActor);
+        markerActor.destroy();
+        markerActor = null;
+    }
+}
+
+/**
+ * Briefly draw an X over a screen position, or an outline over a region, so a
+ * coordinate in the editor can be checked against the actual screen. Purely
+ * visual: it sits above every window and does not take input.
+ */
+export function showMarker(x: number, y: number, w?: number, h?: number, durationMs = 2500): void {
+    removeMarker();
+
+    const isRegion = typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0;
+    const container = new St.Widget({ style_class: 'clickmate-marker', reactive: false });
+
+    if (isRegion) {
+        container.set_position(Math.round(x), Math.round(y));
+        container.set_size(Math.round(w!), Math.round(h!));
+        container.add_style_class_name('clickmate-marker-region');
+    } else {
+        const size = 44;
+        container.set_size(size, size);
+        container.set_position(Math.round(x) - size / 2, Math.round(y) - size / 2);
+
+        // Two bars rotated into an X, pivoted on their own centre.
+        for (const angle of [45, -45]) {
+            const bar = new St.Widget({ style_class: 'clickmate-marker-bar' });
+            bar.set_size(size, 3);
+            bar.set_position(0, size / 2 - 1);
+            bar.set_pivot_point(0.5, 0.5);
+            bar.rotation_angle_z = angle;
+            container.add_child(bar);
+        }
+    }
+
+    const label = new St.Label({
+        style_class: 'clickmate-marker-label',
+        text: isRegion ? `${x},${y} ${w}×${h}` : `${x}, ${y}`,
+    });
+    // Below the marker, unless that would run off the bottom of the screen.
+    const labelY = y + (isRegion ? h! : 24) + 6;
+    const fits = labelY < global.stage.height - 30;
+
+    Main.layoutManager.addChrome(container, { affectsInputRegion: false });
+    Main.layoutManager.addChrome(label, { affectsInputRegion: false });
+    label.set_position(Math.round(x), Math.round(fits ? labelY : y - 34));
+
+    markerActor = container;
+    markerTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
+        markerTimeoutId = 0;
+        Main.layoutManager.removeChrome(label);
+        label.destroy();
+        removeMarker();
+        return GLib.SOURCE_REMOVE;
+    });
 }
 
 /**

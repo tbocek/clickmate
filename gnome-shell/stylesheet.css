@@ -1,163 +1,11 @@
-/* Clickmate popup, HUD and region picker. */
+/* Clickmate: panel popup, run HUD and region picker. */
 
-.clickmate-popup {
-    min-width: 520px;
-    spacing: 6px;
-    padding: 4px;
-}
-
-.clickmate-header {
-    spacing: 6px;
-}
-
-.clickmate-title {
-    font-weight: bold;
-    padding: 4px 0;
-}
-
-.clickmate-hint {
-    font-size: 0.85em;
-    color: rgba(255, 255, 255, 0.6);
-    padding: 2px 0;
-}
-
-.clickmate-controls {
-    spacing: 6px;
-    padding: 4px 0;
-}
-
-.clickmate-small-button,
-.clickmate-primary-button,
-.clickmate-icon-button,
-.clickmate-toggle-button,
-.clickmate-macro-select,
-.clickmate-step-summary {
-    padding: 4px 8px;
-    border-radius: 6px;
-    background-color: rgba(255, 255, 255, 0.08);
-}
-
-.clickmate-small-button:hover,
-.clickmate-primary-button:hover,
-.clickmate-icon-button:hover,
-.clickmate-toggle-button:hover,
-.clickmate-macro-select:hover,
-.clickmate-step-summary:hover {
-    background-color: rgba(255, 255, 255, 0.16);
-}
-
-.clickmate-primary-button {
-    font-weight: bold;
-    background-color: rgba(53, 132, 228, 0.45);
-}
-
-.clickmate-icon-button,
-.clickmate-toggle-button {
-    padding: 4px 6px;
-    background-color: transparent;
-}
-
-.clickmate-step-summary {
-    background-color: transparent;
-    padding: 4px 6px;
-}
-
-.clickmate-macro-list,
-.clickmate-add-picker {
-    spacing: 4px;
-    padding: 4px 0;
-}
-
-.clickmate-macro-row,
-.clickmate-add-row {
-    spacing: 4px;
-}
-
-.clickmate-steps-scroll {
-    max-height: 320px;
-}
-
-.clickmate-steps {
+.clickmate-status-box {
     spacing: 2px;
-}
-
-.clickmate-step-row {
-    spacing: 2px;
-    padding: 1px 2px;
-    border-radius: 6px;
-    border-left: 3px solid transparent;
-}
-
-.clickmate-step-row.is-selected {
-    background-color: rgba(255, 255, 255, 0.1);
-}
-
-.clickmate-step-row.is-disabled {
-    color: rgba(255, 255, 255, 0.4);
-}
-
-/* Per-step outcome markers from the last run. */
-.clickmate-step-row.is-running {
-    border-left-color: #3584e4;
-}
-
-.clickmate-step-row.is-ok {
-    border-left-color: #33d17a;
-}
-
-.clickmate-step-row.is-skipped {
-    border-left-color: #f6d32d;
-}
-
-.clickmate-step-row.is-failed {
-    border-left-color: #e01b24;
-}
-
-.clickmate-editor,
-.clickmate-guard,
-.clickmate-condition {
-    spacing: 4px;
-    padding: 6px 4px;
-}
-
-.clickmate-editor {
-    border-top: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-.clickmate-editor-title {
-    spacing: 6px;
-}
-
-.clickmate-editor-heading {
-    font-weight: bold;
-}
-
-.clickmate-field-row,
-.clickmate-fields {
-    spacing: 6px;
-}
-
-.clickmate-field {
-    spacing: 4px;
-}
-
-.clickmate-field-label {
-    font-size: 0.85em;
-    color: rgba(255, 255, 255, 0.7);
-}
-
-.clickmate-field-entry {
-    min-height: 24px;
-}
-
-.clickmate-condition {
-    border-left: 2px solid rgba(255, 255, 255, 0.15);
-    padding-left: 8px;
 }
 
 .clickmate-status {
-    padding-top: 4px;
-    font-size: 0.9em;
+    font-weight: bold;
 }
 
 .clickmate-detail {
@@ -193,6 +41,26 @@
     border-radius: 6px;
     background-color: rgba(224, 27, 36, 0.8);
     font-weight: bold;
+}
+
+/* Position marker */
+
+.clickmate-marker-bar {
+    background-color: #e01b24;
+    border-radius: 2px;
+}
+
+.clickmate-marker-region {
+    border: 3px solid #e01b24;
+    background-color: rgba(224, 27, 36, 0.12);
+}
+
+.clickmate-marker-label {
+    padding: 3px 8px;
+    border-radius: 6px;
+    background-color: rgba(0, 0, 0, 0.85);
+    color: white;
+    font-size: 0.85em;
 }
 
 /* Region picker */

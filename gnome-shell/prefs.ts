@@ -13,8 +13,9 @@ import {
     STEP_KIND_LABELS,
     type Condition,
     type ConditionType,
-    type GateAction,
+    type LlmCondition,
     type Macro,
+    type Region,
     type Step,
     type StepKind,
     childLists,
@@ -28,6 +29,7 @@ import {
     newMacro,
     newStep,
     parseDocument,
+    parseNumbers,
     removeStep,
     stringifyDocument,
 } from './src/model.js';
@@ -35,12 +37,10 @@ import { MacroStore, isLoopbackEndpoint } from './src/store.js';
 
 const STEP_KINDS: StepKind[] = [
     'click', 'move', 'scroll', 'key', 'text', 'raw', 'wait',
-    'repeat', 'while', 'if', 'gate', 'break', 'continue', 'stop',
+    'repeat', 'while', 'if', 'break', 'continue', 'stop',
 ];
 
-const CONDITION_TYPES: ConditionType[] = ['always', 'llm', 'pixel', 'regionColor', 'and', 'or', 'not'];
-
-const GATE_ACTIONS: GateAction[] = ['skip-rest', 'retry', 'break', 'continue', 'abort'];
+const CONDITION_TYPES: ConditionType[] = ['always', 'llm', 'color', 'and', 'or', 'not'];
 
 function debounce(fn: () => void, ms = 400): () => void {
     let sourceId = 0;
@@ -102,9 +102,13 @@ function comboRow<T extends string>(
         model,
         selected: Math.max(0, options.indexOf(selected)),
     });
+    // Tracked rather than compared against the initial value, so picking A, B, A
+    // still reports the last change.
+    let current = selected;
     row.connect('notify::selected', () => {
         const value = options[row.get_selected()];
-        if (value && value !== selected) {
+        if (value && value !== current) {
+            current = value;
             onChange(value);
         }
     });
@@ -125,10 +129,83 @@ function iconButton(iconName: string, tooltip: string, onClick: () => void): Gtk
 export default class ClickmatePreferences extends ExtensionPreferences {
     private _settings!: Gio.Settings;
     private _store!: MacroStore;
+    private _window?: Adw.PreferencesWindow;
     private _macrosPage!: Adw.PreferencesPage;
     private _macroGroups: Adw.PreferencesGroup[] = [];
 
+    // Structural edits rebuild the whole page, which would otherwise collapse
+    // every expander. Expansion is keyed by step id so it survives a rebuild.
+    private _expanded = new Set<string>();
+    private _rebuilding = false;
+    private _rebuildScheduled = false;
+    // Seeded from the clock, not 0: a reopened preferences window would otherwise
+    // restart at 1 and could write a request identical to a previous one, which
+    // GSettings does not signal.
+    private _requestSerial = GLib.get_real_time();
+    private _closed = false;
+
+    /**
+     * One text field for a group of related numbers — a point, an offset, a
+     * rectangle — instead of a stack of spin rows. `onShow`, when given, adds a
+     * button that flashes the position on the actual screen, which is the only
+     * thing that makes a raw coordinate meaningful.
+     */
+    private _numbersRow(
+        title: string,
+        values: number[],
+        onChange: (values: number[]) => void,
+        onShow?: (values: number[]) => void,
+    ): Adw.EntryRow {
+        const row = new Adw.EntryRow({ title });
+        row.set_text(values.join(', '));
+
+        let current = [...values];
+        const commit = debounce(() => {
+            const parsed = parseNumbers(row.get_text() ?? '', values.length);
+            if (parsed) {
+                row.remove_css_class('error');
+                current = parsed;
+                onChange(parsed);
+            } else {
+                row.add_css_class('error');
+            }
+        });
+        row.connect('changed', commit);
+
+        if (onShow) {
+            const show = new Gtk.Button({
+                label: _('Show'),
+                tooltip_text: _('Flash this position on the screen for a couple of seconds'),
+                valign: Gtk.Align.CENTER,
+            });
+            show.connect('clicked', () => {
+                const parsed = parseNumbers(row.get_text() ?? '', values.length) ?? current;
+                onShow(parsed);
+            });
+            row.add_suffix(show);
+        }
+
+        return row;
+    }
+
+
+    private _expander(key: string, props: Partial<Adw.ExpanderRow.ConstructorProps>): Adw.ExpanderRow {
+        const row = new Adw.ExpanderRow({ ...props, expanded: this._expanded.has(key) });
+        row.connect('notify::expanded', () => {
+            if (this._rebuilding) {
+                return; // teardown, not a user action
+            }
+            if (row.get_expanded()) {
+                this._expanded.add(key);
+            } else {
+                this._expanded.delete(key);
+            }
+        });
+        return row;
+    }
+
     async fillPreferencesWindow(window: Adw.PreferencesWindow): Promise<void> {
+        this._window = window;
         this._settings = this.getSettings();
         this._store = new MacroStore(this._settings);
 
@@ -152,6 +229,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         });
 
         window.connect('close-request', () => {
+            this._closed = true;
             unsubscribe();
             this._store.destroy();
             return false;
@@ -162,18 +240,35 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._store.save();
     }
 
+    /**
+     * Most rebuilds are triggered from a widget's own signal handler, which would
+     * mean destroying that widget mid-emission. Defer to an idle so the handler
+     * returns first; the flag also collapses several edits into one rebuild.
+     */
     private _saveAndRebuild(): void {
         this._store.save();
-        this._rebuildMacros();
+        if (this._rebuildScheduled) {
+            return;
+        }
+        this._rebuildScheduled = true;
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._rebuildScheduled = false;
+            if (!this._closed) {
+                this._rebuildMacros();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // --- macros page -------------------------------------------------------
 
     private _rebuildMacros(): void {
+        this._rebuilding = true;
         for (const group of this._macroGroups) {
             this._macrosPage.remove(group);
         }
         this._macroGroups = [];
+        this._rebuilding = false;
 
         const actions = new Adw.PreferencesGroup({
             title: _('Macros'),
@@ -190,6 +285,30 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._rebuildMacros();
         });
         actions.set_header_suffix(addButton);
+
+        // The panel switch and the shortcuts act on one macro; this is where you
+        // choose which, now that the popup itself is just a switch.
+        if (this._store.macros.length > 0) {
+            const ids = this._store.macros.map(macro => macro.id);
+            const model = new Gtk.StringList();
+            for (const macro of this._store.macros) {
+                model.append(macro.name);
+            }
+            const activeId = this._store.activeMacro?.id ?? ids[0];
+            const selector = new Adw.ComboRow({
+                title: _('Selected macro'),
+                subtitle: _('The one the panel switch and the shortcuts run'),
+                model,
+                selected: Math.max(0, ids.indexOf(activeId)),
+            });
+            selector.connect('notify::selected', () => {
+                const id = ids[selector.get_selected()];
+                if (id && id !== this._store.activeMacroId) {
+                    this._store.activeMacroId = id;
+                }
+            });
+            actions.add(selector);
+        }
 
         const importExport = new Adw.ActionRow({
             title: _('Import / export'),
@@ -265,8 +384,16 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             macro.body.push(newStep(STEP_KINDS[kindDropdown.get_selected()]));
             this._saveAndRebuild();
         });
+        const recordButton = new Gtk.Button({
+            label: _('Record'),
+            tooltip_text: _('Click anywhere on screen, or move the pointer and hold still, to add that as a step'),
+            valign: Gtk.Align.CENTER,
+        });
+        recordButton.connect('clicked', () => this._captureStepInto(macro.id, null, null));
+
         addRow.add_suffix(kindDropdown);
         addRow.add_suffix(addStepButton);
+        addRow.add_suffix(recordButton);
         group.add(addRow);
 
         for (const step of macro.body) {
@@ -277,7 +404,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
     private _buildStepRow(macro: Macro, step: Step): Adw.ExpanderRow {
-        const row = new Adw.ExpanderRow({
+        const stepKey = `step:${step.id}`;
+        const row = this._expander(stepKey, {
             title: describeStep(step),
             subtitle: step.note ?? '',
         });
@@ -321,24 +449,9 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             row.add_row(child);
         }
 
-        // Inline guard.
-        const guardType = step.when ? step.when.type : 'always';
-        row.add_row(comboRow(_('Run this step only when'), CONDITION_TYPES, CONDITION_TYPE_LABELS, guardType, type => {
-            step.when = type === 'always' ? null : newCondition(type);
-            this._saveAndRebuild();
-        }));
-        if (step.when) {
-            for (const child of this._buildConditionRows(step.when, next => {
-                step.when = next;
-                this._saveAndRebuild();
-            })) {
-                row.add_row(child);
-            }
-        }
-
         // Nested bodies.
         for (const list of childLists(step)) {
-            const nested = new Adw.ExpanderRow({
+            const nested = this._expander(`${stepKey}:${list.key}`, {
                 title: list.key === 'else' ? _('Else') : list.key === 'then' ? _('Then') : _('Body'),
                 subtitle: `${list.steps.length} ${list.steps.length === 1 ? _('step') : _('steps')}`,
             });
@@ -354,8 +467,16 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 list.steps.push(newStep(STEP_KINDS[nestedDropdown.get_selected()]));
                 this._saveAndRebuild();
             });
+            const nestedRecord = new Gtk.Button({
+                label: _('Record'),
+                tooltip_text: _('Click anywhere on screen, or move the pointer and hold still, to add that as a step'),
+                valign: Gtk.Align.CENTER,
+            });
+            nestedRecord.connect('clicked', () => this._captureStepInto(macro.id, step.id, list.key));
+
             addNested.add_suffix(nestedDropdown);
             addNested.add_suffix(nestedAdd);
+            addNested.add_suffix(nestedRecord);
             nested.add_row(addNested);
 
             for (const child of list.steps) {
@@ -368,6 +489,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
     private _buildStepFields(macro: Macro, step: Step): Gtk.Widget[] {
+        const condKey = `step:${step.id}:cond`;
         const rows: Gtk.Widget[] = [];
         const save = () => this._save();
         const rebuild = () => this._saveAndRebuild();
@@ -387,14 +509,13 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                         rebuild();
                     }));
                 if (step.mode === 'abs') {
-                    rows.push(spinRow(_('X'), step.x ?? 0, 0, 32768, 1, value => {
-                        step.x = Math.round(value);
-                        save();
-                    }));
-                    rows.push(spinRow(_('Y'), step.y ?? 0, 0, 32768, 1, value => {
-                        step.y = Math.round(value);
-                        save();
-                    }));
+                    rows.push(this._numbersRow(_('Position (x, y)'), [step.x ?? 0, step.y ?? 0],
+                        ([x, y]) => {
+                            step.x = x;
+                            step.y = y;
+                            save();
+                        },
+                        ([x, y]) => this._showMarker(x, y)));
                 }
                 rows.push(spinRow(_('Hold (ms)'), step.holdMs ?? 20, 0, 10000, 5, value => {
                     step.holdMs = Math.round(value);
@@ -410,33 +531,26 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                         rebuild();
                     }));
                 if (step.mode === 'abs') {
-                    rows.push(spinRow(_('X'), step.x ?? 0, 0, 32768, 1, value => {
-                        step.x = Math.round(value);
-                        save();
-                    }));
-                    rows.push(spinRow(_('Y'), step.y ?? 0, 0, 32768, 1, value => {
-                        step.y = Math.round(value);
-                        save();
-                    }));
+                    rows.push(this._numbersRow(_('Position (x, y)'), [step.x ?? 0, step.y ?? 0],
+                        ([x, y]) => {
+                            step.x = x;
+                            step.y = y;
+                            save();
+                        },
+                        ([x, y]) => this._showMarker(x, y)));
                 } else {
-                    rows.push(spinRow(_('Δ X'), step.dx ?? 0, -32768, 32768, 1, value => {
-                        step.dx = Math.round(value);
-                        save();
-                    }));
-                    rows.push(spinRow(_('Δ Y'), step.dy ?? 0, -32768, 32768, 1, value => {
-                        step.dy = Math.round(value);
+                    rows.push(this._numbersRow(_('Offset (dx, dy)'), [step.dx ?? 0, step.dy ?? 0], ([dx, dy]) => {
+                        step.dx = dx;
+                        step.dy = dy;
                         save();
                     }));
                 }
                 break;
 
             case 'scroll':
-                rows.push(spinRow(_('Horizontal clicks'), step.dx, -100, 100, 1, value => {
-                    step.dx = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Vertical clicks'), step.dy, -100, 100, 1, value => {
-                    step.dy = Math.round(value);
+                rows.push(this._numbersRow(_('Clicks (horizontal, vertical)'), [step.dx, step.dy], ([dx, dy]) => {
+                    step.dx = dx;
+                    step.dy = dy;
                     save();
                 }));
                 break;
@@ -526,7 +640,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 rows.push(...this._buildConditionSection(_('Keep looping while'), step.cond, next => {
                     step.cond = next;
                     this._saveAndRebuild();
-                }));
+                }, condKey));
                 rows.push(spinRow(_('Maximum iterations (0 = unlimited)'), step.maxIterations ?? 0, 0, 1000000, 1, value => {
                     step.maxIterations = Math.round(value);
                     save();
@@ -537,30 +651,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 rows.push(...this._buildConditionSection(_('Condition'), step.cond, next => {
                     step.cond = next;
                     this._saveAndRebuild();
-                }));
-                break;
-
-            case 'gate':
-                rows.push(...this._buildConditionSection(_('Only continue when'), step.cond, next => {
-                    step.cond = next;
-                    this._saveAndRebuild();
-                }));
-                rows.push(comboRow(_('Otherwise'), GATE_ACTIONS, {
-                    'skip-rest': _('Skip the rest of this loop iteration'),
-                    'retry': _('Wait and check again'),
-                    'break': _('Leave the loop'),
-                    'continue': _('Jump to the next iteration'),
-                    'abort': _('Stop the whole macro'),
-                }, step.onFalse, value => {
-                    step.onFalse = value;
-                    rebuild();
-                }));
-                if (step.onFalse === 'retry') {
-                    rows.push(spinRow(_('Re-check after (ms)'), step.retryMs ?? 1000, 50, 600000, 100, value => {
-                        step.retryMs = Math.round(value);
-                        save();
-                    }));
-                }
+                }, condKey));
                 break;
 
             default:
@@ -575,16 +666,21 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         title: string,
         condition: Condition,
         replace: (next: Condition) => void,
+        key: string,
     ): Gtk.Widget[] {
         const rows: Gtk.Widget[] = [];
         rows.push(comboRow(title, CONDITION_TYPES, CONDITION_TYPE_LABELS, condition.type, type => {
             replace(newCondition(type));
         }));
-        rows.push(...this._buildConditionRows(condition, replace));
+        rows.push(...this._buildConditionRows(condition, replace, key));
         return rows;
     }
 
-    private _buildConditionRows(condition: Condition, replace: (next: Condition) => void): Gtk.Widget[] {
+    private _buildConditionRows(
+        condition: Condition,
+        replace: (next: Condition) => void,
+        key: string,
+    ): Gtk.Widget[] {
         const rows: Gtk.Widget[] = [];
         const save = () => this._save();
         const rebuild = () => this._saveAndRebuild();
@@ -609,10 +705,19 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     title: _('Screen area'),
                     subtitle: condition.region
                         ? `${condition.region.w}×${condition.region.h} at ${condition.region.x},${condition.region.y}`
-                        : _('The whole screen — pick an area from the panel menu for faster, more reliable answers'),
+                        : _('The whole screen — narrowing it down makes answers faster and more reliable'),
                 });
+                const pick = new Gtk.Button({ label: _('Pick area…'), valign: Gtk.Align.CENTER });
+                pick.connect('clicked', () => this._pickRegionFor(condition));
+                areaRow.add_suffix(pick);
                 if (condition.region) {
-                    const clear = new Gtk.Button({ label: _('Use whole screen'), valign: Gtk.Align.CENTER });
+                    const region = condition.region;
+                    const show = new Gtk.Button({ label: _('Show'), valign: Gtk.Align.CENTER });
+                    show.connect('clicked', () => this._showMarker(region.x, region.y, region.w, region.h));
+                    areaRow.add_suffix(show);
+                }
+                if (condition.region) {
+                    const clear = new Gtk.Button({ label: _('Whole screen'), valign: Gtk.Align.CENTER });
                     clear.connect('clicked', () => {
                         condition.region = null;
                         rebuild();
@@ -621,18 +726,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 }
                 rows.push(areaRow);
 
-                rows.push(entryRow(_('Model override (optional)'), condition.model ?? '', text => {
-                    condition.model = text.trim();
-                    save();
-                }));
-                rows.push(spinRow(_('Timeout (ms)'), condition.timeoutMs ?? 20000, 1000, 300000, 1000, value => {
-                    condition.timeoutMs = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Reuse the answer for (ms)'), condition.cacheMs ?? 0, 0, 600000, 500, value => {
-                    condition.cacheMs = Math.round(value);
-                    save();
-                }));
                 rows.push(comboRow(_('If the request fails'), ['false', 'true', 'abort'] as const, {
                     'false': _('Treat as no'),
                     'true': _('Treat as yes'),
@@ -644,15 +737,17 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 break;
             }
 
-            case 'pixel':
-                rows.push(spinRow(_('X'), condition.x, 0, 32768, 1, value => {
-                    condition.x = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Y'), condition.y, 0, 32768, 1, value => {
-                    condition.y = Math.round(value);
-                    save();
-                }));
+            case 'color':
+                rows.push(this._numbersRow(_('Area (x, y, width, height)'),
+                    [condition.x, condition.y, condition.w, condition.h],
+                    ([x, y, w, h]) => {
+                        condition.x = x;
+                        condition.y = y;
+                        condition.w = Math.max(1, w);
+                        condition.h = Math.max(1, h);
+                        rebuild();
+                    },
+                    ([x, y, w, h]) => this._showMarker(x, y, Math.max(1, w), Math.max(1, h))));
                 rows.push(entryRow(_('Colour (#rrggbb)'), condition.color, text => {
                     condition.color = text.trim();
                     save();
@@ -661,48 +756,25 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     condition.tolerance = Math.round(value);
                     save();
                 }));
-                break;
-
-            case 'regionColor':
-                rows.push(spinRow(_('X'), condition.x, 0, 32768, 1, value => {
-                    condition.x = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Y'), condition.y, 0, 32768, 1, value => {
-                    condition.y = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Width'), condition.w, 1, 32768, 1, value => {
-                    condition.w = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Height'), condition.h, 1, 32768, 1, value => {
-                    condition.h = Math.round(value);
-                    save();
-                }));
-                rows.push(entryRow(_('Colour (#rrggbb)'), condition.color, text => {
-                    condition.color = text.trim();
-                    save();
-                }));
-                rows.push(spinRow(_('Tolerance'), condition.tolerance, 0, 442, 1, value => {
-                    condition.tolerance = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Required coverage (%)'), Math.round(condition.coverage * 100), 1, 100, 1, value => {
-                    condition.coverage = value / 100;
-                    save();
-                }));
+                // Coverage is meaningless for a single pixel, which is the
+                // default shape, so it only appears once there is an area.
+                if (condition.w * condition.h > 1) {
+                    rows.push(spinRow(_('Required coverage (%)'), Math.round(condition.coverage * 100), 1, 100, 1, value => {
+                        condition.coverage = value / 100;
+                        save();
+                    }));
+                }
                 break;
 
             case 'not': {
-                const nested = new Adw.ExpanderRow({
+                const nested = this._expander(`${key}:not`, {
                     title: _('Inverted condition'),
                     subtitle: describeCondition(condition.of),
                 });
                 for (const child of this._buildConditionSection(_('Type'), condition.of, next => {
                     condition.of = next;
                     rebuild();
-                })) {
+                }, `${key}:not`)) {
                     nested.add_row(child);
                 }
                 rows.push(nested);
@@ -711,7 +783,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
             case 'and':
             case 'or': {
-                const container = new Adw.ExpanderRow({
+                const container = this._expander(`${key}:group`, {
                     title: condition.type === 'and' ? _('All of these must hold') : _('Any of these must hold'),
                     subtitle: `${condition.of.length} ${condition.of.length === 1 ? _('condition') : _('conditions')}`,
                 });
@@ -733,7 +805,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 container.add_row(addRow);
 
                 condition.of.forEach((child, index) => {
-                    const childRow = new Adw.ExpanderRow({
+                    const childRow = this._expander(`${key}:${index}`, {
                         title: `${index + 1}. ${describeCondition(child)}`,
                     });
                     childRow.add_suffix(iconButton('user-trash-symbolic', _('Remove'), () => {
@@ -743,7 +815,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     for (const widget of this._buildConditionSection(_('Type'), child, next => {
                         condition.of[index] = next;
                         rebuild();
-                    })) {
+                    }, `${key}:${index}`)) {
                         childRow.add_row(widget);
                     }
                     container.add_row(childRow);
@@ -789,6 +861,79 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     private _toast(message: string): void {
         log(`clickmate: ${message}`);
+    }
+
+    /**
+     * Preferences runs in its own process and cannot see or draw on the screen,
+     * so anything screen-related is a request to the shell: write a serialled
+     * payload to one settings key, wait for the matching answer on another.
+     * `minimize` gets the window out of the way for requests you have to look
+     * at the screen to satisfy.
+     */
+    private _askShell(
+        name: string,
+        payload: object,
+        options: { minimize?: boolean; onResult?: (answer: Record<string, any>) => void } = {},
+    ): void {
+        const settings = this._settings;
+        const serial = ++this._requestSerial;
+
+        if (options.onResult) {
+            const resultKey = `${name}-result`;
+            let handlerId = 0;
+            handlerId = settings.connect(`changed::${resultKey}`, () => {
+                let answer: Record<string, any> | null = null;
+                try {
+                    answer = JSON.parse(settings.get_string(resultKey));
+                } catch {
+                    answer = null;
+                }
+                if (!answer || answer.serial !== serial) {
+                    return; // an older exchange, or someone else's
+                }
+                settings.disconnect(handlerId);
+                if (options.minimize) {
+                    this._window?.present();
+                }
+                options.onResult!(answer);
+            });
+        }
+
+        if (options.minimize) {
+            this._window?.minimize();
+        }
+        settings.set_string(`${name}-request`, JSON.stringify({ serial, ...payload }));
+    }
+
+    /** Watch for one click or move and append it as a step. */
+    private _captureStepInto(macroId: string, parentStepId: string | null, listKey: string | null): void {
+        this._askShell('capture-step', { macroId, parentStepId, listKey }, {
+            minimize: true,
+            onResult: answer => {
+                if (!answer.ok) {
+                    this._toast(`capture failed: ${answer.message ?? 'unknown reason'}`);
+                }
+                // A successful capture lands in `macros`, which rebuilds us anyway.
+            },
+        });
+    }
+
+    /** Drag a rectangle on the real screen to set an LLM condition's area. */
+    private _pickRegionFor(condition: LlmCondition): void {
+        this._askShell('pick-region', {}, {
+            minimize: true,
+            onResult: answer => {
+                if (answer.region) {
+                    condition.region = answer.region as Region;
+                    this._saveAndRebuild();
+                }
+            },
+        });
+    }
+
+    /** Flash an X, or a rectangle, at these coordinates. */
+    private _showMarker(x: number, y: number, w?: number, h?: number): void {
+        this._askShell('show-marker', { x, y, w, h });
     }
 
     // --- other pages -------------------------------------------------------
@@ -874,15 +1019,11 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         page.add(daemon);
 
         const recording = new Adw.PreferencesGroup({ title: _('Recording') });
-        recording.add(switchRow(
-            _('Record pauses'),
-            _('Turn idle gaps into wait steps so playback keeps your rhythm'),
-            this._settings.get_boolean('record-delays'),
-            value => this._settings.set_boolean('record-delays', value),
+        recording.add(spinRow(
+            _('Turn pauses longer than this into waits (ms, 0 = never)'),
+            this._settings.get_int('record-gap-ms'), 0, 60000, 10,
+            value => this._settings.set_int('record-gap-ms', Math.round(value)),
         ));
-        recording.add(spinRow(_('Pause threshold (ms)'), this._settings.get_int('record-gap-ms'), 20, 60000, 10, value => {
-            this._settings.set_int('record-gap-ms', Math.round(value));
-        }));
         recording.add(switchRow(
             _('Record pointer movement'),
             _('Off by default: clicks already carry their own coordinates'),
@@ -915,7 +1056,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             ['open-popup', _('Open the popup')],
             ['run-macro', _('Run or stop the selected macro')],
             ['record-toggle', _('Start or stop recording')],
-            ['pick-point', _('Capture the pointer position')],
+            ['capture-step', _('Capture one click or move as a step')],
             ['panic-stop', _('Emergency stop')],
         ];
 

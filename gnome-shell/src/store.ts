@@ -7,9 +7,7 @@ import Gio from 'gi://Gio';
 import {
     Macro,
     MacroDocument,
-    Step,
     emptyDocument,
-    findStep,
     parseDocument,
     stringifyDocument,
 } from './model.js';
@@ -24,7 +22,7 @@ export interface Config {
     controlSocket: string;
     eventSocket: string;
     neutralizePointerAccel: boolean;
-    recordDelays: boolean;
+    /** 0 means: do not turn idle gaps into wait steps. */
     recordGapMs: number;
     recordMotion: boolean;
     recordRaw: boolean;
@@ -143,17 +141,6 @@ export class MacroStore {
         this.save();
     }
 
-    /** Find a step anywhere in the document, plus the macro that owns it. */
-    locateStep(stepId: string): { macro: Macro; step: Step } | null {
-        for (const macro of this._doc.macros) {
-            const loc = findStep(macro.body, stepId);
-            if (loc) {
-                return { macro, step: loc.step };
-            }
-        }
-        return null;
-    }
-
     get config(): Config {
         const s = this._settings;
         return {
@@ -166,7 +153,6 @@ export class MacroStore {
             controlSocket: s.get_string('control-socket'),
             eventSocket: s.get_string('event-socket'),
             neutralizePointerAccel: s.get_boolean('neutralize-pointer-accel'),
-            recordDelays: s.get_boolean('record-delays'),
             recordGapMs: s.get_int('record-gap-ms'),
             recordMotion: s.get_boolean('record-motion'),
             recordRaw: s.get_boolean('record-raw'),

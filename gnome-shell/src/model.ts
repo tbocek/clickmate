@@ -23,27 +23,18 @@ export interface LlmCondition {
     prompt: string;
     /** null/undefined means "the whole screen". */
     region?: Region | null;
-    /** Overrides the globally configured model when set. */
-    model?: string;
-    timeoutMs?: number;
     /** Invert the answer: expect:false means "proceed when the answer is NO". */
     expect?: boolean;
-    /** Reuse a verdict this many ms instead of asking again. 0 disables. */
-    cacheMs?: number;
     /** What to do when the request fails or times out. */
     onError?: 'false' | 'true' | 'abort';
 }
 
-export interface PixelCondition {
-    type: 'pixel';
-    x: number;
-    y: number;
-    color: string;
-    tolerance: number;
-}
-
-export interface RegionColorCondition {
-    type: 'regionColor';
+/**
+ * A colour check over a screen area. A 1×1 area with full coverage is the
+ * single-pixel case, so there is one condition here rather than two.
+ */
+export interface ColorCondition {
+    type: 'color';
     x: number;
     y: number;
     w: number;
@@ -72,8 +63,7 @@ export interface NotCondition {
 export type Condition =
     | AlwaysCondition
     | LlmCondition
-    | PixelCondition
-    | RegionColorCondition
+    | ColorCondition
     | AndCondition
     | OrCondition
     | NotCondition;
@@ -102,8 +92,6 @@ interface StepCommon {
     id: string;
     enabled?: boolean;
     note?: string;
-    /** Inline guard: the step only runs when this evaluates true. */
-    when?: Condition | null;
 }
 
 export type ClickStep = StepCommon & {
@@ -180,16 +168,6 @@ export type IfStep = StepCommon & {
     else?: Step[];
 };
 
-export type GateAction = 'skip-rest' | 'break' | 'continue' | 'abort' | 'retry';
-
-export type GateStep = StepCommon & {
-    kind: 'gate';
-    cond: Condition;
-    onFalse: GateAction;
-    /** For onFalse: 'retry' — how long to wait before re-evaluating. */
-    retryMs?: number;
-};
-
 export type FlowStep = StepCommon & {
     kind: 'break' | 'continue' | 'stop';
 };
@@ -205,7 +183,6 @@ export type Step =
     | RepeatStep
     | WhileStep
     | IfStep
-    | GateStep
     | FlowStep;
 
 export type StepKind = Step['kind'];
@@ -213,8 +190,6 @@ export type StepKind = Step['kind'];
 export interface Macro {
     id: string;
     name: string;
-    /** GTK accelerator string, e.g. '<Control><Shift>F5'. Empty for none. */
-    shortcut?: string;
     /** Drop physical input while this macro runs. */
     suppressInput?: boolean;
     body: Step[];
@@ -236,7 +211,7 @@ export function emptyDocument(): MacroDocument {
 }
 
 export function newMacro(name = 'New macro'): Macro {
-    return { id: newId(), name, shortcut: '', suppressInput: false, body: [] };
+    return { id: newId(), name, suppressInput: false, body: [] };
 }
 
 export function newCondition(type: ConditionType): Condition {
@@ -247,17 +222,13 @@ export function newCondition(type: ConditionType): Condition {
                 prompt: 'Is the button on the left green?',
                 region: null,
                 expect: true,
-                timeoutMs: 20000,
-                cacheMs: 0,
                 onError: 'false',
             };
-        case 'pixel':
-            return { type: 'pixel', x: 0, y: 0, color: '#22aa33', tolerance: 24 };
-        case 'regionColor':
+        case 'color':
             return {
-                type: 'regionColor',
-                x: 0, y: 0, w: 40, h: 40,
-                color: '#22aa33', tolerance: 24, coverage: 0.6,
+                type: 'color',
+                x: 0, y: 0, w: 1, h: 1,
+                color: '#22aa33', tolerance: 24, coverage: 1,
             };
         case 'and':
             return { type: 'and', of: [] };
@@ -293,9 +264,7 @@ export function newStep(kind: StepKind): Step {
         case 'while':
             return { id, kind: 'while', cond: newCondition('llm'), maxIterations: 0, body: [] };
         case 'if':
-            return { id, kind: 'if', cond: newCondition('pixel'), then: [], else: [] };
-        case 'gate':
-            return { id, kind: 'gate', cond: newCondition('llm'), onFalse: 'skip-rest', retryMs: 1000 };
+            return { id, kind: 'if', cond: newCondition('color'), then: [], else: [] };
         case 'break':
         case 'continue':
         case 'stop':
@@ -311,17 +280,16 @@ export function childLists(step: Step): { key: string; steps: Step[] }[] {
         case 'while':
             return [{ key: 'body', steps: step.body }];
         case 'if':
+            // Materialise the else branch: callers push into these arrays, and a
+            // `?? []` fallback would silently swallow whatever they add.
+            step.else ??= [];
             return [
                 { key: 'then', steps: step.then },
-                { key: 'else', steps: step.else ?? [] },
+                { key: 'else', steps: step.else },
             ];
         default:
             return [];
     }
-}
-
-export function isContainer(step: Step): boolean {
-    return step.kind === 'repeat' || step.kind === 'while' || step.kind === 'if';
 }
 
 // --- tree operations -------------------------------------------------------
@@ -404,22 +372,6 @@ export function insertStep(list: Step[], step: Step, afterId?: string | null): v
     loc.list.splice(loc.index + 1, 0, step);
 }
 
-/** Wrap a step in a new container step, in place. */
-export function wrapStep(list: Step[], id: string, kind: 'repeat' | 'while' | 'if'): Step | null {
-    const loc = findStep(list, id);
-    if (!loc) {
-        return null;
-    }
-    const wrapper = newStep(kind);
-    const target = childLists(wrapper)[0];
-    if (!target) {
-        return null;
-    }
-    target.steps.push(loc.step);
-    loc.list.splice(loc.index, 1, wrapper);
-    return wrapper;
-}
-
 /** Deep copy with fresh ids, for duplicating a step. */
 export function cloneStep(step: Step): Step {
     const copy = JSON.parse(JSON.stringify(step)) as Step;
@@ -435,6 +387,169 @@ export function cloneStep(step: Step): Step {
 
 // --- serialisation ---------------------------------------------------------
 
+/** `not` that avoids stacking double negations when migrating. */
+function negate(cond: Condition): Condition {
+    return cond.type === 'not' ? cond.of : { type: 'not', of: cond };
+}
+
+/**
+ * Colour checks used to be two conditions, `pixel` and `regionColor`, where the
+ * first was just a 1×1 region. Fold both onto the surviving `color` type.
+ */
+function migrateCondition(cond: Condition | null | undefined): Condition | null {
+    if (!cond) {
+        return null;
+    }
+    // Deliberately erased to a plain record: the live union no longer has these
+    // members, and narrowing against it would elide the checks below.
+    const legacy = cond as unknown as {
+        type: string; x?: number; y?: number; w?: number; h?: number;
+        color?: string; tolerance?: number; coverage?: number;
+    };
+
+    if (legacy.type === 'pixel') {
+        return {
+            type: 'color',
+            x: legacy.x ?? 0,
+            y: legacy.y ?? 0,
+            w: 1,
+            h: 1,
+            color: legacy.color ?? '#000000',
+            tolerance: legacy.tolerance ?? 24,
+            coverage: 1,
+        };
+    }
+    if (legacy.type === 'regionColor') {
+        return {
+            type: 'color',
+            x: legacy.x ?? 0,
+            y: legacy.y ?? 0,
+            w: Math.max(1, legacy.w ?? 1),
+            h: Math.max(1, legacy.h ?? 1),
+            color: legacy.color ?? '#000000',
+            tolerance: legacy.tolerance ?? 24,
+            coverage: legacy.coverage ?? 1,
+        };
+    }
+
+    if (cond.type === 'and' || cond.type === 'or') {
+        cond.of = cond.of.map(child => migrateCondition(child)!).filter(Boolean);
+    } else if (cond.type === 'not') {
+        cond.of = migrateCondition(cond.of) ?? { type: 'always' };
+    }
+    return cond;
+}
+
+interface LegacyGate {
+    kind: 'gate';
+    id: string;
+    cond: Condition;
+    onFalse?: 'skip-rest' | 'break' | 'continue' | 'abort' | 'retry';
+    retryMs?: number;
+}
+
+/**
+ * `gate` was a second way to spell `if`, and its "skip the rest" action in fact
+ * broke out of the loop. Rewrite each one as the plain control flow it meant,
+ * following the labels the editor showed rather than what the runner did.
+ */
+function migrateGates(steps: Step[]): Step[] {
+    const migrated: Step[] = [];
+
+    for (let index = 0; index < steps.length; index++) {
+        const step = steps[index];
+
+        // Gates nest, so recurse before deciding what this step becomes.
+        if (step.kind === 'repeat' || step.kind === 'while') {
+            step.body = migrateGates(step.body);
+        } else if (step.kind === 'if') {
+            step.then = migrateGates(step.then);
+            step.else = migrateGates(step.else ?? []);
+        }
+
+        if ((step as unknown as LegacyGate).kind !== 'gate') {
+            migrated.push(step);
+            continue;
+        }
+
+        const gate = step as unknown as LegacyGate;
+        const cond = migrateCondition(gate.cond) ?? { type: 'always' };
+        const flow = (kind: 'break' | 'continue' | 'stop'): Step => ({ id: newId(), kind });
+        const ifNot = (body: Step[]): Step =>
+            ({ id: newId(), kind: 'if', cond: negate(cond), then: body, else: [] });
+
+        switch (gate.onFalse) {
+            case 'break':
+                migrated.push(ifNot([flow('break')]));
+                break;
+            case 'continue':
+                migrated.push(ifNot([flow('continue')]));
+                break;
+            case 'abort':
+                migrated.push(ifNot([flow('stop')]));
+                break;
+            case 'retry':
+                migrated.push({
+                    id: newId(),
+                    kind: 'while',
+                    cond: negate(cond),
+                    maxIterations: 0,
+                    body: [{ id: newId(), kind: 'wait', ms: gate.retryMs ?? 1000, jitterMs: 0 }],
+                });
+                break;
+            case 'skip-rest':
+            default:
+                // Everything after the gate was conditional on it, so that is
+                // exactly the body of the `if` it becomes.
+                migrated.push({
+                    id: newId(),
+                    kind: 'if',
+                    cond,
+                    then: migrateGates(steps.slice(index + 1)),
+                    else: [],
+                });
+                return migrated;
+        }
+    }
+
+    return migrated;
+}
+
+/**
+ * Steps used to carry an inline `when` guard, which did the same job as an `if`
+ * with a one-step body. Rather than dropping the field — which would silently
+ * make a guarded step run unconditionally — wrap each one in the `if` it always
+ * was.
+ */
+function migrateGuards(steps: Step[]): Step[] {
+    const migrated: Step[] = [];
+
+    for (const step of steps) {
+        if (step.kind === 'repeat' || step.kind === 'while') {
+            step.body = migrateGuards(step.body);
+        } else if (step.kind === 'if') {
+            step.then = migrateGuards(step.then);
+            step.else = migrateGuards(step.else ?? []);
+        }
+
+        if (step.kind === 'if' || step.kind === 'while') {
+            step.cond = migrateCondition(step.cond) ?? { type: 'always' };
+        }
+
+        const legacy = step as Step & { when?: Condition | null };
+        const guard = migrateCondition(legacy.when);
+        delete legacy.when;
+
+        if (guard && guard.type !== 'always') {
+            migrated.push({ id: newId(), kind: 'if', cond: guard, then: [step], else: [] });
+        } else {
+            migrated.push(step);
+        }
+    }
+
+    return migrated;
+}
+
 export function parseDocument(json: string): MacroDocument {
     if (!json || json.trim() === '') {
         return emptyDocument();
@@ -449,7 +564,6 @@ export function parseDocument(json: string): MacroDocument {
             const fixed: Macro = {
                 id: macro.id || newId(),
                 name: macro.name || 'Unnamed macro',
-                shortcut: macro.shortcut ?? '',
                 suppressInput: macro.suppressInput ?? false,
                 body: Array.isArray(macro.body) ? macro.body : [],
             };
@@ -458,6 +572,7 @@ export function parseDocument(json: string): MacroDocument {
                     loc.step.id = newId();
                 }
             });
+            fixed.body = migrateGuards(migrateGates(fixed.body));
             return fixed;
         });
         return { version: raw.version ?? DOCUMENT_VERSION, macros };
@@ -469,6 +584,20 @@ export function parseDocument(json: string): MacroDocument {
 
 export function stringifyDocument(doc: MacroDocument): string {
     return JSON.stringify(doc);
+}
+
+/**
+ * Parse a group of related numbers typed as one field: "100, 200",
+ * "100 200", "100x200". Returns null unless exactly `count` numbers are found,
+ * so a half-typed value never overwrites a good one.
+ */
+export function parseNumbers(text: string, count: number): number[] | null {
+    const parts = (text ?? '').split(/[\s,;x×]+/).filter(Boolean);
+    if (parts.length !== count) {
+        return null;
+    }
+    const numbers = parts.map(Number);
+    return numbers.every(Number.isFinite) ? numbers.map(Math.round) : null;
 }
 
 // --- human readable summaries ---------------------------------------------
@@ -487,10 +616,10 @@ export function describeCondition(cond: Condition | null | undefined): string {
             return 'always';
         case 'llm':
             return `${cond.expect === false ? 'LLM says no: ' : 'LLM: '}"${truncate(cond.prompt)}"`;
-        case 'pixel':
-            return `pixel ${cond.x},${cond.y} ≈ ${cond.color}`;
-        case 'regionColor':
-            return `${Math.round((cond.coverage ?? 0) * 100)}% of ${cond.w}×${cond.h} @ ${cond.x},${cond.y} ≈ ${cond.color}`;
+        case 'color':
+            return cond.w * cond.h === 1
+                ? `pixel ${cond.x},${cond.y} ≈ ${cond.color}`
+                : `${Math.round((cond.coverage ?? 0) * 100)}% of ${cond.w}×${cond.h} @ ${cond.x},${cond.y} ≈ ${cond.color}`;
         case 'and':
             return cond.of.length ? cond.of.map(describeCondition).join(' and ') : 'always';
         case 'or':
@@ -543,16 +672,6 @@ export function describeStep(step: Step): string {
             return `While ${describeCondition(step.cond)}`;
         case 'if':
             return `If ${describeCondition(step.cond)}`;
-        case 'gate': {
-            const action = {
-                'skip-rest': 'skip the rest',
-                'break': 'break the loop',
-                'continue': 'next iteration',
-                'abort': 'stop the macro',
-                'retry': 'wait and re-check',
-            }[step.onFalse];
-            return `Only continue if ${describeCondition(step.cond)} — otherwise ${action}`;
-        }
         case 'break':
             return 'Break out of the loop';
         case 'continue':
@@ -573,7 +692,6 @@ export const STEP_KIND_LABELS: Record<StepKind, string> = {
     repeat: 'Repeat loop',
     while: 'While loop',
     if: 'If / else',
-    gate: 'Gate (proceed only if…)',
     break: 'Break',
     continue: 'Continue',
     stop: 'Stop',
@@ -582,8 +700,7 @@ export const STEP_KIND_LABELS: Record<StepKind, string> = {
 export const CONDITION_TYPE_LABELS: Record<ConditionType, string> = {
     always: 'Always true',
     llm: 'Ask the LLM about a screenshot',
-    pixel: 'Pixel colour',
-    regionColor: 'Region colour',
+    color: 'Screen colour',
     and: 'All of…',
     or: 'Any of…',
     not: 'Not…',

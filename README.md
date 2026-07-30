@@ -7,11 +7,10 @@ conditions that can look at the screen.
 
 A macro is a tree of steps: clicks, key presses, typed text, scrolls, waits and
 recorded event trains. Around them you can put `repeat`, `while`, `if` and `gate`
-blocks, and every block — plus every individual step — can be guarded by a
-condition:
+blocks, and each of those is driven by a condition:
 
-- **pixel / region colour** — "the pixel at 840,512 is green ±24". Sub-5 ms,
-  deterministic, no network.
+- **screen colour** — "the pixel at 840,512 is green ±24", or "60% of this
+  40×40 area is green". Sub-5 ms, deterministic, no network.
 - **ask a local vision model** — a screenshot plus your own prompt ("Is the button
   on the left green?"), answered yes/no by an OpenAI-compatible endpoint running
   on your machine.
@@ -21,9 +20,10 @@ The macro that ships on first run is the one this was built for:
 
 ```
 repeat forever:
-    only continue if the model says the left button is green   → otherwise skip to the wait
-    click at x,y
-    press E                                                    → only when a pixel check passes
+    if the model says the left button is green:
+        click at x,y
+        if a colour check passes:
+            press E
     wait 10s
 ```
 
@@ -32,11 +32,11 @@ repeat forever:
 - **Recording** of real mouse and keyboard input, coalesced into readable steps
   (clicks carry their absolute screen position, idle gaps become waits), or
   verbatim event trains for games.
-- **A step editor in the panel popup** — plain-language summaries, inline editing,
-  per-step *run this one* buttons, per-condition *test now* buttons, and
-  enable/disable so you can bisect a macro instead of deleting from it.
-- **A full tree editor in preferences** — nested conditions, every field, JSON
-  import/export.
+- **A full tree editor in preferences** — every step and condition, nested
+  loops and `and`/`or`/`not`, plain-language summaries, enable/disable so you can
+  bisect a macro instead of deleting from it, and JSON import/export.
+- **A panel popup that stays out of the way** — one switch, what is running, and a
+  way into the settings.
 - **Emergency stop** that aborts mid-macro and releases every held key.
 
 ## How it fits together
@@ -110,6 +110,16 @@ then point *Preferences → Model → Endpoint* at
 `http://localhost:11434/v1/chat/completions`. Preferences warns when the endpoint
 is not on this machine, because every check uploads a picture of your screen to it.
 
+Endpoint, model and timeout are global — conditions carry only the prompt, the
+screen area, and what to do on a failure. Each condition is asked for a single
+JSON object, `{"match": true|false, "reason": "…"}`, and `response_format:
+json_object` is sent so servers that support constrained decoding enforce it
+(the field is dropped automatically if the server rejects it). Small models
+still wander, so the reply parser also accepts fenced JSON, `"true"` as a
+string, `1`/`0`, alternate keys like `answer` or `result`, trailing chatter, and
+a bare YES/NO. If a prompt misbehaves, the popup's status line shows what the
+model actually said.
+
 ## Usage
 
 | Shortcut | Action |
@@ -117,12 +127,28 @@ is not on this machine, because every check uploads a picture of your screen to 
 | `Ctrl+Shift+F5` | Open the popup |
 | `Ctrl+Shift+F6` | Run / stop the selected macro |
 | `Ctrl+Shift+R` | Start / stop recording into the selected macro |
-| `Ctrl+Shift+P` | Capture the pointer position into the selected step |
+| `Ctrl+Shift+M` | Capture one click or move, appended to the selected macro |
 | `Super+Escape` | Emergency stop |
 
-Build a macro by recording it, then open the popup and adjust: click a step to
-edit its fields in place, press `▶` to try just that step, press **Test now** on a
-condition to see how it answers against the current screen.
+The panel popup holds only a master switch, the name of whatever is running, and a
+**Settings** button. Everything else — macros, steps, conditions, which macro the
+switch runs — lives in the preferences window.
+
+Build a macro by recording it (`Ctrl+Shift+R`), then open Settings to adjust it.
+
+Next to every **Add** button there is a **Record** button that captures a single
+action, which is the quickest way to fill in coordinates: the window gets out of
+the way, and the next click you make becomes a `click` step at that position. If
+you move the pointer and hold still for about a second instead, you get a `move`
+step. `Ctrl+Shift+M` does the same thing without opening Settings, appending to
+the end of the selected macro.
+
+Coordinates are single fields — `100, 200` for a point, `10, 20, 40, 40` for an
+area — each with a **Show** button that flashes a red X (or an outline) at that
+spot on the real screen for a couple of seconds, so you can check a number
+without running anything. Screen areas for `llm` conditions can also be chosen
+with **Pick area…**, which drops the window out of the way and lets you drag a
+rectangle over the screen.
 
 ### Daemon HTTP API
 
@@ -138,7 +164,17 @@ curl --unix-socket /var/run/click-socket -X POST \
 
 curl --unix-socket /var/run/click-socket -X POST -d '{"on":true}'  http://localhost/record
 curl --unix-socket /var/run/click-socket -X POST -d '{}'           http://localhost/stop
-socat - UNIX-CONNECT:/var/run/clickmate-events   # observed events, while recording
+```
+
+Watching the recording stream (`socat` works too, if you have it):
+
+```bash
+curl --unix-socket /var/run/click-socket -X POST -d '{"on":true}' http://localhost/record
+python3 -c "
+import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('/var/run/clickmate-events')
+[print(s.recv(4096).decode(), end='') for _ in range(20)]"
+curl --unix-socket /var/run/click-socket -X POST -d '{"on":false}' http://localhost/record
 ```
 
 `dt` is microseconds to wait *before* the event; `type`/`code`/`value` are raw

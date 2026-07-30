@@ -4,6 +4,8 @@
 // knows relative pointer deltas. The shell knows the true pointer position, so
 // button presses are annotated here with global.get_pointer() at press time.
 
+import GLib from 'gi://GLib';
+
 import { DaemonClient, EventStream, type StreamedEvent } from './daemon.js';
 import {
     EV_KEY,
@@ -35,8 +37,14 @@ export class Recorder {
     private _config: Config;
     private _callbacks: RecorderCallbacks;
 
-    private _recording = false;
+    private _mode: 'idle' | 'macro' | 'single' = 'idle';
     private _steps: Step[] = [];
+
+    // Single-action capture state.
+    private _settleId = 0;
+    private _timeoutId = 0;
+    private _finishSingle: ((step: Step | null) => void) | null = null;
+    private _moved = false;
 
     private _lastT = 0;
     private _heldMods = new Map<number, number>();
@@ -46,6 +54,7 @@ export class Recorder {
     private _motionPending = false;
     private _rawEvents: { dt: number; type: number; code: number; value: number }[] = [];
     private _ignoredCodes = new Set<number>();
+    private _settleMs = 900;
 
     constructor(daemon: DaemonClient, config: Config, callbacks: RecorderCallbacks = {}) {
         this._daemon = daemon;
@@ -53,8 +62,14 @@ export class Recorder {
         this._callbacks = callbacks;
     }
 
+    /** True while a whole macro is being recorded. */
     get recording(): boolean {
-        return this._recording;
+        return this._mode === 'macro';
+    }
+
+    /** True while either kind of capture is in progress. */
+    get busy(): boolean {
+        return this._mode !== 'idle';
     }
 
     setConfig(config: Config): void {
@@ -69,12 +84,10 @@ export class Recorder {
         this._ignoredCodes = new Set(codes);
     }
 
-    async start(): Promise<void> {
-        if (this._recording) {
-            return;
-        }
+    /** Open the event stream and tell the daemon to start reporting. */
+    private async _beginSession(mode: 'macro' | 'single'): Promise<void> {
         this._reset();
-        this._recording = true;
+        this._mode = mode;
 
         this._stream = new EventStream(this._daemon.eventPath);
         await this._stream.open(
@@ -86,24 +99,92 @@ export class Recorder {
             },
         );
         await this._daemon.setRecording(true);
+    }
+
+    private _endSession(): void {
+        this._mode = 'idle';
+        this._clearTimers();
+        this._stream?.close();
+        this._stream = null;
+        void this._daemon.setRecording(false).catch(error => {
+            log(`clickmate: could not stop daemon recording: ${(error as Error).message}`);
+        });
+    }
+
+    async start(): Promise<void> {
+        if (this.busy) {
+            return;
+        }
+        await this._beginSession('macro');
         this._callbacks.onStatus?.('Recording — press the shortcut again to stop');
+    }
+
+    /**
+     * Watch for a single action and return it as one step: a click as soon as
+     * the button is released, or a move once the pointer has been still for
+     * `settleMs`. Shares the recorder's stream and click-building so the two
+     * cannot drift apart.
+     */
+    async captureOne(settleMs = 900, timeoutMs = 30000): Promise<Step | null> {
+        if (this.busy) {
+            return null;
+        }
+
+        const result = new Promise<Step | null>(resolve => {
+            this._finishSingle = resolve;
+        });
+        this._settleMs = settleMs;
+
+        try {
+            await this._beginSession('single');
+        } catch (error) {
+            this._settleSingle(null);
+            throw error;
+        }
+
+        this._timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeoutMs, () => {
+            this._timeoutId = 0;
+            this._settleSingle(null);
+            return GLib.SOURCE_REMOVE;
+        });
+
+        return result;
+    }
+
+    /** Give up on a pending single capture. */
+    cancel(): void {
+        if (this._mode === 'single') {
+            this._settleSingle(null);
+        }
+    }
+
+    private _settleSingle(step: Step | null): void {
+        if (this._mode !== 'single') {
+            return;
+        }
+        this._endSession();
+        const finish = this._finishSingle;
+        this._finishSingle = null;
+        finish?.(step);
+    }
+
+    private _clearTimers(): void {
+        if (this._settleId) {
+            GLib.source_remove(this._settleId);
+            this._settleId = 0;
+        }
+        if (this._timeoutId) {
+            GLib.source_remove(this._timeoutId);
+            this._timeoutId = 0;
+        }
     }
 
     /** Stop recording and return everything captured since start(). */
     async stop(): Promise<Step[]> {
-        if (!this._recording) {
+        if (this._mode !== 'macro') {
             return [];
         }
-        this._recording = false;
-
-        try {
-            await this._daemon.setRecording(false);
-        } catch (error) {
-            log(`clickmate: could not stop daemon recording: ${(error as Error).message}`);
-        }
-        this._stream?.close();
-        this._stream = null;
-
+        this._endSession();
         this._flushMotion();
         if (this._config.recordRaw && this._rawEvents.length > 0) {
             const step: RawStep = {
@@ -123,15 +204,18 @@ export class Recorder {
     }
 
     destroy(): void {
+        this.cancel();
+        this._clearTimers();
         this._stream?.close();
         this._stream = null;
-        this._recording = false;
+        this._mode = 'idle';
     }
 
     // --- event handling ----------------------------------------------------
 
     private _reset(): void {
         this._steps = [];
+        this._moved = false;
         this._lastT = 0;
         this._heldMods.clear();
         this._modifierCombined = false;
@@ -147,7 +231,11 @@ export class Recorder {
     }
 
     private _onEvent(event: StreamedEvent): void {
-        if (!this._recording) {
+        if (this._mode === 'idle') {
+            return;
+        }
+        if (this._mode === 'single') {
+            this._onSingleEvent(event);
             return;
         }
 
@@ -190,7 +278,7 @@ export class Recorder {
 
     /** Idle gaps become explicit wait steps so playback keeps the same rhythm. */
     private _insertGap(t: number): void {
-        if (!this._config.recordDelays || this._lastT === 0) {
+        if (this._config.recordGapMs <= 0 || this._lastT === 0) {
             return;
         }
         const gapMs = Math.round((t - this._lastT) / 1000);
@@ -213,15 +301,7 @@ export class Recorder {
         if (!this._config.recordMotion) {
             return;
         }
-        const [x, y] = global.get_pointer();
-        const step: MoveStep = {
-            id: newId(),
-            kind: 'move',
-            mode: 'abs',
-            x: Math.round(x),
-            y: Math.round(y),
-        };
-        this._emit(step);
+        this._emit(this._pointerStep());
     }
 
     private _onButton(event: StreamedEvent, button: NonNullable<ReturnType<typeof buttonFromCode>>): void {
@@ -237,16 +317,77 @@ export class Recorder {
             return; // release without a matching press, e.g. recording started mid-click
         }
 
-        const step: ClickStep = {
+        this._emit(this._buildClick(button, pending, event.t));
+    }
+
+    /** The one place a press/release pair becomes a click step. */
+    private _buildClick(
+        button: NonNullable<ReturnType<typeof buttonFromCode>>,
+        press: { t: number; x: number; y: number },
+        releasedAt: number,
+    ): ClickStep {
+        return {
             id: newId(),
             kind: 'click',
             button,
             mode: 'abs',
-            x: pending.x,
-            y: pending.y,
-            holdMs: Math.max(1, Math.round((event.t - pending.t) / 1000)),
+            x: press.x,
+            y: press.y,
+            holdMs: Math.max(1, Math.round((releasedAt - press.t) / 1000)),
         };
-        this._emit(step);
+    }
+
+    private _pointerStep(): MoveStep {
+        const [x, y] = global.get_pointer();
+        return { id: newId(), kind: 'move', mode: 'abs', x: Math.round(x), y: Math.round(y) };
+    }
+
+    // --- single-action capture ---------------------------------------------
+
+    private _onSingleEvent(event: StreamedEvent): void {
+        if (event.type === EV_REL && (event.code === REL_X || event.code === REL_Y)) {
+            this._moved = true;
+            this._restartSettleTimer();
+            return;
+        }
+        if (event.type !== EV_KEY || event.value === 2) {
+            return;
+        }
+
+        const button = buttonFromCode(event.code);
+        if (button === null) {
+            return; // a key press is not something this capture produces
+        }
+
+        if (event.value === 1) {
+            const [x, y] = global.get_pointer();
+            this._pendingClick = { code: event.code, t: event.t, x: Math.round(x), y: Math.round(y) };
+            if (this._settleId) {
+                GLib.source_remove(this._settleId);
+                this._settleId = 0;
+            }
+            return;
+        }
+
+        const press = this._pendingClick;
+        this._pendingClick = null;
+        if (press && press.code === event.code) {
+            this._settleSingle(this._buildClick(button, press, event.t));
+        }
+    }
+
+    private _restartSettleTimer(): void {
+        if (this._settleId) {
+            GLib.source_remove(this._settleId);
+        }
+        this._settleId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this._settleMs, () => {
+            this._settleId = 0;
+            if (this._pendingClick) {
+                return GLib.SOURCE_REMOVE; // mid-drag, wait for the release
+            }
+            this._settleSingle(this._moved ? this._pointerStep() : null);
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     private _onKey(event: StreamedEvent): void {

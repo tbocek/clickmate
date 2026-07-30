@@ -5,7 +5,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import { ConditionAborted, ConditionEvaluator, type EvaluationTrace } from './conditions.js';
+import { ConditionEvaluator, type EvaluationTrace } from './conditions.js';
 import { DaemonClient } from './daemon.js';
 import {
     BUTTON_CODES,
@@ -21,7 +21,6 @@ import {
 } from './keymap.js';
 import type {
     ClickStep,
-    GateStep,
     KeyStep,
     Macro,
     MoveStep,
@@ -201,17 +200,6 @@ export class MacroRunner {
         this._callbacks.onStepState?.(step.id, 'running');
         this._status(describeStep(step));
 
-        if (step.when) {
-            const allowed = await this._evaluator.evaluate(step.when);
-            if (this._cancelled) {
-                return 'stop';
-            }
-            if (!allowed) {
-                this._callbacks.onStepState?.(step.id, 'skipped');
-                return 'normal';
-            }
-        }
-
         try {
             const signal = await this._execute(step);
             this._callbacks.onStepState?.(step.id, this._cancelled ? 'skipped' : 'ok');
@@ -307,45 +295,12 @@ export class MacroRunner {
                 return this._runList(proceed ? step.then : step.else ?? []);
             }
 
-            case 'gate':
-                return this._doGate(step);
-
             case 'break':
                 return 'break';
             case 'continue':
                 return 'continue';
             case 'stop':
                 return 'stop';
-        }
-    }
-
-    private async _doGate(step: GateStep): Promise<Signal> {
-        for (;;) {
-            if (this._cancelled) {
-                return 'stop';
-            }
-            const proceed = await this._evaluator.evaluate(step.cond);
-            if (this._cancelled) {
-                return 'stop';
-            }
-            if (proceed) {
-                return 'normal';
-            }
-
-            switch (step.onFalse) {
-                case 'skip-rest':
-                    return 'break';
-                case 'break':
-                    return 'break';
-                case 'continue':
-                    return 'continue';
-                case 'abort':
-                    return 'stop';
-                case 'retry':
-                    this._status(`Waiting for: ${describeStep(step)}`);
-                    await this._sleep(Math.max(50, step.retryMs ?? 1000));
-                    break;
-            }
         }
     }
 
@@ -565,6 +520,3 @@ export function restorePointerAccel(settings: Gio.Settings): void {
     settings.set_string('saved-accel-profile', '');
     settings.set_double('saved-pointer-speed', 0.0);
 }
-
-export { ConditionAborted };
-export type { EvaluationTrace };

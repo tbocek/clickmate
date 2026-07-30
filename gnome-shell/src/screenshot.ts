@@ -126,26 +126,6 @@ export function readPixel(pixbuf: GdkPixbuf.Pixbuf, x = 0, y = 0): Rgb {
     return { r: pixels[offset], g: pixels[offset + 1], b: pixels[offset + 2] };
 }
 
-export function averageColor(pixbuf: GdkPixbuf.Pixbuf): Rgb {
-    const pixels = pixbuf.get_pixels();
-    const channels = pixbuf.get_n_channels();
-    const rowstride = pixbuf.get_rowstride();
-    const width = pixbuf.get_width();
-    const height = pixbuf.get_height();
-
-    let r = 0, g = 0, b = 0;
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const offset = y * rowstride + x * channels;
-            r += pixels[offset];
-            g += pixels[offset + 1];
-            b += pixels[offset + 2];
-        }
-    }
-    const count = Math.max(1, width * height);
-    return { r: r / count, g: g / count, b: b / count };
-}
-
 /** Fraction of pixels within `tolerance` of `target`, 0..1. */
 export function colorCoverage(pixbuf: GdkPixbuf.Pixbuf, target: Rgb, tolerance: number): number {
     const pixels = pixbuf.get_pixels();

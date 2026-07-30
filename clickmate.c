@@ -451,8 +451,20 @@ static struct captured_device *device_for(unsigned int type, unsigned int code) 
         want = 0;
     }
 
+    if (want == 0) {
+        return device_count > 0 ? &devices[0] : NULL;
+    }
+
+    // Prefer a device dedicated to this class. Combined receivers (a Logitech
+    // unifying mouse advertises KEY_ESC and so on) otherwise swallow every
+    // keystroke into the mouse clone just because they come first.
     for (int i = 0; i < device_count; i++) {
-        if (want == 0 || (devices[i].cls & want)) {
+        if (devices[i].cls == want) {
+            return &devices[i];
+        }
+    }
+    for (int i = 0; i < device_count; i++) {
+        if (devices[i].cls & want) {
             return &devices[i];
         }
     }
@@ -554,12 +566,11 @@ static enum MHD_Result send_status(struct MHD_Connection *connection) {
     }
 
     snprintf(body, sizeof(body),
-             "{\"version\":%d,\"recording\":%s,\"playing\":%s,\"suppressed\":%s,\"status\":\"%s\",\"devices\":[%s]}",
+             "{\"version\":%d,\"recording\":%s,\"playing\":%s,\"suppressed\":%s,\"devices\":[%s]}",
              API_VERSION,
              recording ? "true" : "false",
              playing ? "true" : "false",
              suppress_input ? "true" : "false",
-             playing ? "on" : "off",
              devs);
 
     return send_json(connection, MHD_HTTP_OK, body);
@@ -664,18 +675,6 @@ static enum MHD_Result handle_post(struct MHD_Connection *connection, const char
             json_object_put(parsed);
         }
         return send_json(connection, MHD_HTTP_OK, on ? "{\"suppressed\":true}" : "{\"suppressed\":false}");
-    }
-
-    // Legacy autoclicker toggle, kept so an old extension build does not hard-fail.
-    if (strcmp(url, "/") == 0 && parsed && json_object_object_get_ex(parsed, "status", &field)) {
-        printf("[WARN] Legacy POST / {\"status\":...} is deprecated; use /play and /stop\n");
-        const char *status = json_object_get_string(field);
-        if (status && strcmp(status, "off") == 0) {
-            play_abort = 1;
-            release_all_held();
-        }
-        json_object_put(parsed);
-        return send_json(connection, MHD_HTTP_OK, "{\"status\":\"off\"}");
     }
 
     if (parsed) {

@@ -16,7 +16,46 @@
             <description>Id of the macro the popup and shortcuts act on</description>
         </key>
 
+        <!-- Preferences cannot see or draw on the screen from its own process,
+             so each of these is a serialled JSON request to the shell, answered
+             on the matching -result key. -->
+        <key name="pick-region-request" type="s">
+            <default>''</default>
+            <summary>Region pick request</summary>
+            <description>Internal: asks the shell to let you drag out a screen area</description>
+        </key>
+
+        <key name="pick-region-result" type="s">
+            <default>''</default>
+            <summary>Region pick result</summary>
+            <description>Internal: the rectangle the shell captured, as JSON</description>
+        </key>
+
+        <key name="capture-step-request" type="s">
+            <default>''</default>
+            <summary>Capture request</summary>
+            <description>Internal: JSON naming the macro and list a captured step should go into</description>
+        </key>
+
+        <key name="capture-step-result" type="s">
+            <default>''</default>
+            <summary>Capture result</summary>
+            <description>Internal: JSON reporting how the last capture went</description>
+        </key>
+
+        <key name="show-marker-request" type="s">
+            <default>''</default>
+            <summary>Marker request</summary>
+            <description>Internal: JSON position or region the shell should flash on screen</description>
+        </key>
+
         <!-- Shortcuts -->
+        <key name="capture-step" type="as">
+            <default><![CDATA[['<Control><Shift>M']]]></default>
+            <summary>Capture one click or move</summary>
+            <description>Append the next click or pointer move to the selected macro as a step</description>
+        </key>
+
         <key name="open-popup" type="as">
             <default><![CDATA[['<Control><Shift>F5']]]></default>
             <summary>Open the macro popup</summary>
@@ -35,22 +74,10 @@
             <description>Keyboard shortcut that toggles recording into the selected macro</description>
         </key>
 
-        <key name="pick-point" type="as">
-            <default><![CDATA[['<Control><Shift>P']]]></default>
-            <summary>Pick a screen coordinate</summary>
-            <description>Capture the pointer position for use as a click target or pixel check</description>
-        </key>
-
         <key name="panic-stop" type="as">
             <default><![CDATA[['<Super>Escape']]]></default>
             <summary>Emergency stop</summary>
             <description>Abort any running macro and release every held key</description>
-        </key>
-
-        <key name="toggle-autoclicker" type="as">
-            <default><![CDATA[['<Control><Shift>F5']]]></default>
-            <summary>Deprecated autoclicker toggle</summary>
-            <description>Kept so existing configurations keep loading; use run-macro instead</description>
         </key>
 
         <!-- Local LLM -->
@@ -125,17 +152,11 @@
         </key>
 
         <!-- Recording -->
-        <key name="record-delays" type="b">
-            <default>true</default>
-            <summary>Record pauses</summary>
-            <description>Insert wait steps for idle gaps while recording</description>
-        </key>
-
         <key name="record-gap-ms" type="i">
             <default>250</default>
-            <range min="20" max="60000"/>
+            <range min="0" max="60000"/>
             <summary>Pause threshold</summary>
-            <description>Idle gaps longer than this become wait steps</description>
+            <description>Idle gaps longer than this become wait steps; 0 records no pauses</description>
         </key>
 
         <key name="record-motion" type="b">
@@ -148,12 +169,6 @@
             <default>false</default>
             <summary>Record verbatim</summary>
             <description>Store the untouched event train instead of readable steps; needed for games</description>
-        </key>
-
-        <key name="log-level" type="s">
-            <default>'info'</default>
-            <summary>Log level</summary>
-            <description>One of error, warn, info, debug</description>
         </key>
 
     </schema>

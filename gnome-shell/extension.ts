@@ -14,15 +14,25 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { ConditionEvaluator, type EvaluationTrace } from './src/conditions.js';
 import { DaemonClient } from './src/daemon.js';
-import { MacroRunner, restorePointerAccel, type StepState } from './src/runner.js';
+import { MacroRunner, restorePointerAccel } from './src/runner.js';
 import { Recorder, acceleratorToEvdevCodes } from './src/recorder.js';
 import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
-import type { Condition, Region, Step } from './src/model.js';
+import { childLists, describeStep, findStep, type Macro, type Step } from './src/model.js';
 import { MacroPopup } from './ui/popup.js';
-import { RunHud, pickRegion } from './ui/overlay.js';
+import { RunHud, pickRegion, showMarker } from './ui/overlay.js';
 
-const KEYBINDINGS = ['open-popup', 'run-macro', 'record-toggle', 'pick-point', 'panic-stop'];
+const KEYBINDINGS = [
+    'open-popup', 'run-macro', 'record-toggle', 'capture-step', 'panic-stop',
+];
+
+/** Where preferences wants a captured step to land. */
+interface CaptureTarget {
+    serial: number;
+    macroId?: string;
+    parentStepId?: string | null;
+    listKey?: string | null;
+}
 
 export default class ClickmateExtension extends Extension {
     private _settings?: Gio.Settings;
@@ -56,7 +66,6 @@ export default class ClickmateExtension extends Extension {
         this._daemon = new DaemonClient(config.controlSocket, config.eventSocket);
         this._evaluator = new ConditionEvaluator(config, trace => this._onTrace(trace));
         this._runner = new MacroRunner(this._daemon, this._evaluator, this._settings, config, {
-            onStepState: (id, state) => this._onStepState(id, state),
             onStatus: text => this._onStatus(text),
             onRunningChanged: running => this._onRunningChanged(running),
             onFinished: (reason, error) => {
@@ -99,6 +108,7 @@ export default class ClickmateExtension extends Extension {
         }
         this._boundKeys = [];
 
+        this._recorder?.cancel();
         this._runner?.stop();
         this._recorder?.destroy();
         this._evaluator?.destroy();
@@ -144,12 +154,13 @@ export default class ClickmateExtension extends Extension {
             store: this._store!,
             isRunning: () => this._runner?.running ?? false,
             isRecording: () => this._recorder?.recording ?? false,
-            onRun: () => this._runActiveMacro(),
-            onStop: () => this._runner?.stop(),
-            onToggleRecord: () => void this._toggleRecording(),
-            onRunStep: step => void this._runSingleStep(step),
-            onTestCondition: condition => void this._testCondition(condition),
-            onPickRegion: apply => void this._pickRegion(apply),
+            onEnabledChanged: enabled => {
+                if (enabled) {
+                    this._runActiveMacro();
+                } else {
+                    this._runner?.stop();
+                }
+            },
             onOpenPreferences: () => {
                 this._indicator?.menu.close(true);
                 this.openPreferences();
@@ -187,7 +198,7 @@ export default class ClickmateExtension extends Extension {
     }
 
     private _onStatus(text: string): void {
-        this._popup?.setStatus(text);
+        this._popup?.setDetail(text);
         this._hud?.setStatus(text);
     }
 
@@ -195,10 +206,6 @@ export default class ClickmateExtension extends Extension {
         const text = `${trace.condition} → ${trace.result ? 'yes' : 'no'}${trace.detail ? ` (${trace.detail})` : ''}`;
         this._popup?.setDetail(text);
         this._hud?.setDetail(text);
-    }
-
-    private _onStepState(id: string, state: StepState): void {
-        this._popup?.setStepState(id, state);
     }
 
     private _onRunningChanged(running: boolean): void {
@@ -216,46 +223,133 @@ export default class ClickmateExtension extends Extension {
     private _runActiveMacro(): void {
         const macro = this._store?.activeMacro;
         if (!macro) {
-            Main.notify('Clickmate', 'No macro selected.');
+            Main.notify('Clickmate', 'No macro selected. Pick one in Settings.');
+            this._popup?.refresh();
             return;
         }
         if (this._runner?.running) {
             this._runner.stop();
             return;
         }
-        this._popup?.clearStepStates();
         this._indicator?.menu.close(true);
         void this._runner?.run(macro);
     }
 
-    private async _runSingleStep(step: Step): Promise<void> {
-        if (!this._runner || this._runner.running) {
-            return;
+    /**
+     * Preferences cannot grab the screen from its own process, so it bumps a
+     * counter and we hand the picked rectangle back through settings.
+     */
+    /**
+     * Watch for one click or pointer move and append it as a step. `target`
+     * comes from preferences and names the list it should land in; without one
+     * the step goes to the end of the selected macro.
+     */
+    private async _captureStep(target?: CaptureTarget): Promise<{ ok: boolean; message: string }> {
+        if (!this._store || !this._daemon) {
+            return { ok: false, message: 'not ready' };
         }
-        this._indicator?.menu.close(true);
-        await this._runner.runSingle(step);
-    }
+        if (this._recorder?.busy) {
+            return { ok: false, message: this._recorder.recording ? 'stop the recording first' : 'already waiting for a click' };
+        }
 
-    private async _testCondition(condition: Condition): Promise<void> {
-        if (!this._evaluator) {
-            return;
+        const macro = target?.macroId ? this._store.getMacro(target.macroId) : this._store.activeMacro;
+        if (!macro) {
+            return { ok: false, message: 'no macro to add to' };
         }
-        this._onStatus('Testing condition…');
+
+        const list = this._targetList(macro, target);
+        if (!list) {
+            return { ok: false, message: 'could not find where to add the step' };
+        }
+
+        this._indicator?.menu.close(true);
+        Main.notify('Clickmate', 'Click anywhere to capture it, or move the pointer and hold still.');
+
+        let step: Step | null = null;
         try {
-            // Trace output already lands in the detail line via _onTrace.
-            await this._evaluator.evaluate(condition);
+            step = await this._recorder!.captureOne();
         } catch (error) {
-            this._popup?.setDetail(`Test failed: ${(error as Error).message}`);
+            return { ok: false, message: (error as Error).message };
+        }
+
+        if (!step) {
+            return { ok: false, message: 'nothing captured' };
+        }
+
+        list.push(step);
+        this._store.save();
+
+        const message = `Added: ${describeStep(step)}`;
+        Main.notify('Clickmate', message);
+        return { ok: true, message };
+    }
+
+    private _targetList(macro: Macro, target?: CaptureTarget): Step[] | null {
+        if (!target?.parentStepId) {
+            return macro.body;
+        }
+        const loc = findStep(macro.body, target.parentStepId);
+        if (!loc) {
+            return null;
+        }
+        const lists = childLists(loc.step);
+        const match = lists.find(list => list.key === target.listKey) ?? lists[0];
+        return match ? match.steps : null;
+    }
+
+    private async _onCaptureRequested(): Promise<void> {
+        const raw = this._settings?.get_string('capture-step-request') ?? '';
+        if (!raw) {
+            return;
+        }
+        let request: CaptureTarget | null = null;
+        try {
+            request = JSON.parse(raw) as CaptureTarget;
+        } catch {
+            return;
+        }
+        if (!request) {
+            return;
+        }
+
+        const result = await this._captureStep(request);
+        this._settings?.set_string(
+            'capture-step-result',
+            JSON.stringify({ serial: request.serial, ...result }),
+        );
+    }
+
+    /** Flash an X (or a rectangle) where preferences is pointing. */
+    private _onMarkerRequested(): void {
+        const raw = this._settings?.get_string('show-marker-request') ?? '';
+        if (!raw) {
+            return;
+        }
+        try {
+            const request = JSON.parse(raw) as { x: number; y: number; w?: number; h?: number };
+            if (Number.isFinite(request.x) && Number.isFinite(request.y)) {
+                showMarker(request.x, request.y, request.w, request.h);
+            }
+        } catch {
+            // Malformed request; nothing sensible to show.
         }
     }
 
-    private async _pickRegion(apply: (region: Region) => void): Promise<void> {
-        this._indicator?.menu.close(true);
-        const region = await pickRegion();
-        if (region) {
-            apply(region);
+    /** The serial preferences stamped on a request, echoed back with the answer. */
+    private _requestSerial(key: string): number {
+        try {
+            return JSON.parse(this._settings?.get_string(key) ?? '{}').serial ?? 0;
+        } catch {
+            return 0;
         }
-        this._indicator?.menu.open(true);
+    }
+
+    private async _onRegionRequested(): Promise<void> {
+        // The serial is echoed back so the answer always differs from the last
+        // one; GSettings would not signal a repeated identical value.
+        const serial = this._requestSerial('pick-region-request');
+        const region = await pickRegion();
+        this._settings?.set_string('pick-region-result', JSON.stringify({ serial, region }));
     }
 
     private async _toggleRecording(): Promise<void> {
@@ -295,14 +389,6 @@ export default class ClickmateExtension extends Extension {
         this._updateIcon();
     }
 
-    private _pickPoint(): void {
-        const [x, y] = global.get_pointer();
-        const px = Math.round(x);
-        const py = Math.round(y);
-        const applied = this._popup?.applyPickedPoint(px, py);
-        Main.notify('Clickmate', applied ?? `Pointer is at ${px},${py}`);
-    }
-
     private _onShortcut(name: string): void {
         switch (name) {
             case 'open-popup':
@@ -314,10 +400,11 @@ export default class ClickmateExtension extends Extension {
             case 'record-toggle':
                 void this._toggleRecording();
                 break;
-            case 'pick-point':
-                this._pickPoint();
+            case 'capture-step':
+                void this._captureStep();
                 break;
             case 'panic-stop':
+                this._recorder?.cancel();
                 this._runner?.stop();
                 if (this._recorder?.recording) {
                     void this._recorder.stop();
@@ -334,11 +421,23 @@ export default class ClickmateExtension extends Extension {
             this._popup?.refresh();
             return;
         }
+        if (key === 'pick-region-request') {
+            void this._onRegionRequested();
+            return;
+        }
+        if (key === 'capture-step-request') {
+            void this._onCaptureRequested();
+            return;
+        }
+        if (key === 'show-marker-request') {
+            this._onMarkerRequested();
+            return;
+        }
         if (key === 'record-toggle') {
             this._updateIgnoredRecordingKeys();
             return;
         }
-        if (key.startsWith('saved-')) {
+        if (key.startsWith('saved-') || key.endsWith('-result')) {
             return;
         }
 
@@ -348,7 +447,6 @@ export default class ClickmateExtension extends Extension {
         }
         this._daemon?.setPaths(config.controlSocket, config.eventSocket);
         this._evaluator?.setConfig(config);
-        this._evaluator?.clearCache();
         this._runner?.setConfig(config);
         this._recorder?.setConfig(config);
     }

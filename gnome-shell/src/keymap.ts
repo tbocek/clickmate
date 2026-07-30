@@ -104,11 +104,6 @@ export function isModifier(code: number): boolean {
            code === KEY_CODES.KEY_LEFTMETA || code === KEY_CODES.KEY_RIGHTMETA;
 }
 
-export const MODIFIER_NAMES = [
-    'KEY_LEFTCTRL', 'KEY_LEFTSHIFT', 'KEY_LEFTALT', 'KEY_LEFTMETA',
-    'KEY_RIGHTCTRL', 'KEY_RIGHTSHIFT', 'KEY_RIGHTALT', 'KEY_RIGHTMETA',
-];
-
 // --- text -> key events ----------------------------------------------------
 // A US layout table. Typing text on another layout is best done by recording it;
 // this covers the common ASCII case for scripted input.

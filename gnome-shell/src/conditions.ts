@@ -3,7 +3,7 @@
 
 import GLib from 'gi://GLib';
 
-import type { Condition, LlmCondition, PixelCondition, RegionColorCondition } from './model.js';
+import type { ColorCondition, Condition, LlmCondition } from './model.js';
 import { describeCondition } from './model.js';
 import { LlmClient, LlmError, type LlmSettings } from './llm.js';
 import type { Config } from './store.js';
@@ -27,15 +27,8 @@ export interface EvaluationTrace {
 
 export class ConditionAborted extends Error {}
 
-interface CacheEntry {
-    result: boolean;
-    detail: string;
-    expiresAt: number;
-}
-
 export class ConditionEvaluator {
     private _llm = new LlmClient();
-    private _cache = new Map<string, CacheEntry>();
     private _config: Config;
     private _onTrace?: (trace: EvaluationTrace) => void;
 
@@ -50,11 +43,6 @@ export class ConditionEvaluator {
 
     destroy(): void {
         this._llm.destroy();
-        this._cache.clear();
-    }
-
-    clearCache(): void {
-        this._cache.clear();
     }
 
     /** Evaluate a condition tree. Throws ConditionAborted for onError:'abort'. */
@@ -114,33 +102,34 @@ export class ConditionEvaluator {
                 return { result: false, detail: lastDetail };
             }
 
-            case 'pixel':
-                return this._evaluatePixel(condition);
-
-            case 'regionColor':
-                return this._evaluateRegionColor(condition);
+            case 'color':
+                return this._evaluateColor(condition);
 
             case 'llm':
                 return this._evaluateLlm(condition);
         }
     }
 
-    private async _evaluatePixel(condition: PixelCondition): Promise<{ result: boolean; detail: string }> {
-        const pixbuf = await captureRegion(condition.x, condition.y, 1, 1);
-        const actual = readPixel(pixbuf, 0, 0);
+    /**
+     * One capture covers both cases: a 1×1 area is the single-pixel check, and
+     * reporting the colour actually found is far more useful there than a
+     * coverage percentage.
+     */
+    private async _evaluateColor(condition: ColorCondition): Promise<{ result: boolean; detail: string }> {
+        const w = Math.max(1, condition.w);
+        const h = Math.max(1, condition.h);
+        const pixbuf = await captureRegion(condition.x, condition.y, w, h);
         const target = parseColor(condition.color);
-        const distance = colorDistance(actual, target);
-        return {
-            result: distance <= condition.tolerance,
-            detail: `found ${formatColor(actual)}, distance ${distance.toFixed(1)} vs tolerance ${condition.tolerance}`,
-        };
-    }
 
-    private async _evaluateRegionColor(
-        condition: RegionColorCondition,
-    ): Promise<{ result: boolean; detail: string }> {
-        const pixbuf = await captureRegion(condition.x, condition.y, condition.w, condition.h);
-        const target = parseColor(condition.color);
+        if (w * h === 1) {
+            const actual = readPixel(pixbuf, 0, 0);
+            const distance = colorDistance(actual, target);
+            return {
+                result: distance <= condition.tolerance,
+                detail: `found ${formatColor(actual)}, distance ${distance.toFixed(1)} vs tolerance ${condition.tolerance}`,
+            };
+        }
+
         const coverage = colorCoverage(pixbuf, target, condition.tolerance);
         return {
             result: coverage >= condition.coverage,
@@ -148,30 +137,14 @@ export class ConditionEvaluator {
         };
     }
 
-    private _cacheKey(condition: LlmCondition): string {
-        const region = condition.region
-            ? `${condition.region.x},${condition.region.y},${condition.region.w},${condition.region.h}`
-            : 'screen';
-        return `${condition.model ?? ''}|${region}|${condition.prompt}`;
-    }
-
     private async _evaluateLlm(condition: LlmCondition): Promise<{ result: boolean; detail: string }> {
-        const cacheMs = condition.cacheMs ?? 0;
-        const key = this._cacheKey(condition);
-        const now = GLib.get_monotonic_time() / 1000;
-
-        if (cacheMs > 0) {
-            const cached = this._cache.get(key);
-            if (cached && cached.expiresAt > now) {
-                return { result: cached.result, detail: `${cached.detail} (cached)` };
-            }
-        }
-
+        // Endpoint, model and timeout are global settings: a per-condition copy
+        // of each was more knobs than anyone wants on every prompt.
         const settings: LlmSettings = {
             endpoint: this._config.llmEndpoint,
-            model: condition.model || this._config.llmModel,
+            model: this._config.llmModel,
             apiKey: this._config.llmApiKey,
-            timeoutMs: condition.timeoutMs ?? this._config.llmTimeoutMs,
+            timeoutMs: this._config.llmTimeoutMs,
         };
 
         try {
@@ -184,10 +157,6 @@ export class ConditionEvaluator {
             const expect = condition.expect !== false;
             const result = verdict.match === expect;
             const detail = `model said ${verdict.match ? 'yes' : 'no'}${verdict.reason ? ` — ${verdict.reason}` : ''} (${verdict.latencyMs}ms)`;
-
-            if (cacheMs > 0) {
-                this._cache.set(key, { result, detail, expiresAt: now + cacheMs });
-            }
             return { result, detail };
         } catch (error) {
             const message = error instanceof LlmError ? error.message : (error as Error).message;

@@ -1,7 +1,7 @@
 import {
     parseDocument, stringifyDocument, newStep, describeStep, describeCondition,
-    insertStep, moveStep, removeStep, wrapStep, cloneStep, walk, findStep, newMacro,
-    STEP_KIND_LABELS,
+    insertStep, moveStep, removeStep, cloneStep, walk, findStep, newMacro,
+    STEP_KIND_LABELS, parseNumbers,
 } from '../dist/src/model.js';
 import { textToEvents, keyCode, keyName, charToKey, buttonFromCode } from '../dist/src/keymap.js';
 import { starterMacro } from '../dist/src/starter.js';
@@ -36,28 +36,50 @@ check('move down', moveStep(macro.body, a.id, 1) && macro.body[1].id === a.id);
 check('move past end returns false', moveStep(macro.body, loop.id, 1) === false);
 const clone = cloneStep(loop);
 check('clone gets fresh ids', clone.id !== loop.id && clone.body[0].id !== inner.id);
-check('wrap', wrapStep(macro.body, a.id, 'while')?.kind === 'while');
 check('remove', removeStep(macro.body, b.id)?.id === b.id);
 let counted = 0;
 walk(macro.body, () => counted++);
-check('walk visits nested', counted >= 4, String(counted));
+check('walk visits nested', counted >= 3, String(counted));
 
 // round trip
 const doc = { version: 1, macros: [starterMacro()] };
 const back = parseDocument(stringifyDocument(doc));
 check('round trip macros', back.macros.length === 1);
-check('round trip nested body', back.macros[0].body[0].body.length === 4);
+check('round trip nested body', back.macros[0].body[0].body.length === 2,
+      String(back.macros[0].body[0].body.length));
 check('parse empty', parseDocument('').macros.length === 0);
 check('parse garbage', parseDocument('{{{').macros.length === 0);
 
 // starter describes the requested loop
 const starter = starterMacro();
 check('starter is forever loop', describeStep(starter.body[0]) === 'Repeat forever', describeStep(starter.body[0]));
-const gate = starter.body[0].body[0];
-check('starter gate mentions the prompt', describeStep(gate).includes('button on the left green'), describeStep(gate));
-check('starter has a 10s wait', describeStep(starter.body[0].body[3]) === 'Wait 10s', describeStep(starter.body[0].body[3]));
-const guarded = starter.body[0].body[2];
-check('starter per-step condition', describeCondition(guarded.when).startsWith('pixel'), describeCondition(guarded.when));
+const outerIf = starter.body[0].body[0];
+check('starter gate is now an if', outerIf.kind === 'if', outerIf.kind);
+check('starter if mentions the prompt', describeStep(outerIf).includes('button on the left green'), describeStep(outerIf));
+check('starter wait is outside the if', describeStep(starter.body[0].body[1]) === 'Wait 10s',
+      describeStep(starter.body[0].body[1]));
+check('starter acts inside the if', outerIf.then[0].kind === 'click');
+const innerIf = outerIf.then[1];
+check('starter nested colour check', innerIf.kind === 'if' && describeCondition(innerIf.cond).startsWith('pixel'),
+      describeCondition(innerIf.cond));
+check('starter nested body', innerIf.then.length === 1 && innerIf.then[0].kind === 'key');
+
+// legacy inline `when` guards migrate into an if rather than vanishing
+const legacy = JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'legacy', body: [
+    { id: 'a', kind: 'click', button: 'left', mode: 'abs', x: 1, y: 2,
+      when: { type: 'pixel', x: 3, y: 4, color: '#fff', tolerance: 5 } },
+    { id: 'b', kind: 'repeat', count: 2, body: [
+        { id: 'c', kind: 'key', code: 'KEY_E', action: 'tap',
+          when: { type: 'llm', prompt: 'ready?' } },
+    ] },
+    { id: 'd', kind: 'wait', ms: 5, when: { type: 'always' } },
+] }] });
+const mig = parseDocument(legacy).macros[0].body;
+check('guard migrated to if', mig[0].kind === 'if' && mig[0].then[0].id === 'a', mig[0].kind);
+check('guard condition preserved', describeCondition(mig[0].cond).startsWith('pixel'), describeCondition(mig[0].cond));
+check('guard removed from step', mig[0].then[0].when === undefined);
+check('nested guard migrated', mig[1].body[0].kind === 'if' && mig[1].body[0].then[0].id === 'c');
+check('always guard not wrapped', mig[2].kind === 'wait' && mig[2].when === undefined, mig[2].kind);
 
 // keymap
 check('keyCode KEY_E', keyCode('KEY_E') === 18);
@@ -70,6 +92,58 @@ const ev = textToEvents('Hi!', 0);
 check('textToEvents balanced', ev.filter(e => e.value === 1).length === ev.filter(e => e.value === 0).length, JSON.stringify(ev.length));
 check('textToEvents releases shift at end', ev[ev.length - 1].value === 0 && ev[ev.length - 1].code === 42);
 
+// coordinate field parsing
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+check('numbers comma', eq(parseNumbers('100, 200', 2), [100, 200]));
+check('numbers space', eq(parseNumbers('100 200', 2), [100, 200]));
+check('numbers x', eq(parseNumbers('40x60', 2), [40, 60]));
+check('numbers rect', eq(parseNumbers('10, 20, 30, 40', 4), [10, 20, 30, 40]));
+check('numbers negative', eq(parseNumbers('-5, 12', 2), [-5, 12]));
+check('numbers rounded', eq(parseNumbers('10.6, 20.2', 2), [11, 20]));
+check('numbers padded', eq(parseNumbers('  100 ,  200  ', 2), [100, 200]));
+check('numbers too few', parseNumbers('100', 2) === null);
+check('numbers too many', parseNumbers('1,2,3', 2) === null);
+check('numbers not a number', parseNumbers('abc, 2', 2) === null);
+check('numbers empty', parseNumbers('', 2) === null);
+
+// gate steps migrate into plain control flow
+const gateDoc = (onFalse, extra = {}) => JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'g', body: [
+    { id: 'r', kind: 'repeat', count: 'forever', body: [
+        { id: 'g1', kind: 'gate', onFalse, ...extra, cond: { type: 'llm', prompt: 'ready?' } },
+        { id: 's1', kind: 'click', button: 'left', mode: 'abs', x: 1, y: 2 },
+        { id: 's2', kind: 'wait', ms: 10000 },
+    ] },
+] }] });
+const gateBody = onFalse => parseDocument(gateDoc(onFalse)).macros[0].body[0].body;
+
+const skip = gateBody('skip-rest');
+check('gate skip-rest wraps the rest in an if', skip.length === 1 && skip[0].kind === 'if', JSON.stringify(skip.map(s => s.kind)));
+check('gate skip-rest keeps the following steps', skip[0].then.length === 2 && skip[0].then[0].id === 's1');
+const brk = gateBody('break');
+check('gate break becomes if-not-break', brk[0].kind === 'if' && brk[0].cond.type === 'not' && brk[0].then[0].kind === 'break');
+check('gate break leaves later steps alone', brk.length === 3 && brk[1].id === 's1');
+const cont = gateBody('continue');
+check('gate continue becomes if-not-continue', cont[0].then[0].kind === 'continue');
+const abort = gateBody('abort');
+check('gate abort becomes if-not-stop', abort[0].then[0].kind === 'stop');
+const retryBody = parseDocument(gateDoc('retry', { retryMs: 500 })).macros[0].body[0].body;
+check('gate retry becomes a while loop', retryBody[0].kind === 'while' && retryBody[0].cond.type === 'not');
+check('gate retry waits inside the loop', retryBody[0].body[0].kind === 'wait' && retryBody[0].body[0].ms === 500);
+
+// pixel and regionColor fold onto one colour condition
+const colDoc = JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'c', body: [
+    { id: 'a', kind: 'if', cond: { type: 'pixel', x: 5, y: 6, color: '#abcdef', tolerance: 9 }, then: [], else: [] },
+    { id: 'b', kind: 'if', cond: { type: 'regionColor', x: 1, y: 2, w: 30, h: 40, color: '#123456', tolerance: 7, coverage: 0.5 }, then: [], else: [] },
+    { id: 'c', kind: 'if', cond: { type: 'and', of: [{ type: 'pixel', x: 1, y: 1, color: '#fff', tolerance: 2 }] }, then: [], else: [] },
+] }] });
+const cols = parseDocument(colDoc).macros[0].body;
+check('pixel becomes 1x1 colour', cols[0].cond.type === 'color' && cols[0].cond.w === 1 && cols[0].cond.coverage === 1);
+check('pixel keeps its position', cols[0].cond.x === 5 && cols[0].cond.y === 6 && cols[0].cond.color === '#abcdef');
+check('regionColor becomes colour', cols[1].cond.type === 'color' && cols[1].cond.w === 30 && cols[1].cond.coverage === 0.5);
+check('nested condition migrated', cols[2].cond.of[0].type === 'color');
+check('1x1 colour describes as a pixel', describeCondition(cols[0].cond).startsWith('pixel'), describeCondition(cols[0].cond));
+check('area colour describes as coverage', describeCondition(cols[1].cond).includes('30×40'), describeCondition(cols[1].cond));
+
 // llm verdict parsing
 check('verdict json', parseVerdict('{"match": true, "reason": "green"}').match === true);
 check('verdict fenced', parseVerdict('```json\n{"match": false, "reason":"grey"}\n```').match === false);
@@ -78,6 +152,19 @@ check('verdict no', parseVerdict('No.').match === false);
 check('verdict string bool', parseVerdict('{"match":"yes"}').match === true);
 check('verdict junk', parseVerdict('hmm') === null);
 check('verdict empty', parseVerdict('') === null);
+// small-model output shapes
+check('verdict stringly false', parseVerdict('{"match":"false"}').match === false);
+check('verdict numeric', parseVerdict('{"match":1}').match === true);
+check('verdict numeric zero', parseVerdict('{"match":0}').match === false);
+check('verdict alt key answer', parseVerdict('{"answer": true, "reason":"x"}').match === true);
+check('verdict alt key result', parseVerdict('{"result": false}').match === false);
+check('verdict alt key verdict', parseVerdict('{"verdict":"yes"}').match === true);
+check('verdict reason via explanation', parseVerdict('{"match":true,"explanation":"grn"}').reason === 'grn');
+check('verdict trailing chatter', parseVerdict('{"match": true, "reason":"ok"} I hope that helps!').match === true);
+check('verdict two objects', parseVerdict('{"match": false, "reason":"a"}\n{"match": true}').match === false);
+check('verdict preamble prose', parseVerdict('Sure! Here is the JSON:\n{"match": true, "reason":"green"}').match === true);
+check('verdict unknown keys only', parseVerdict('{"colour":"green"}') === null,
+      JSON.stringify(parseVerdict('{"colour":"green"}')));
 
 // endpoint check
 check('loopback localhost', isLoopbackEndpoint('http://localhost:11434/v1/chat/completions'));

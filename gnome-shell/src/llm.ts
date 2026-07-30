@@ -21,18 +21,39 @@ export interface Verdict {
     /** The answer to the question, after `expect` has been applied by the caller. */
     match: boolean;
     reason: string;
-    /** Raw model output, for showing in the UI when a prompt misbehaves. */
-    raw: string;
     latencyMs: number;
 }
 
 export class LlmError extends Error {}
 
-const INSTRUCTION =
-    'Look at the screenshot and answer the question about it.\n' +
-    'Reply with a single JSON object and nothing else:\n' +
-    '{"match": true or false, "reason": "<at most 12 words>"}\n' +
-    'Set "match" to true only when the question is clearly satisfied by the screenshot.';
+/**
+ * Deliberately blunt and repetitive. Small local vision models drift away from
+ * a loose format immediately: they answer in prose, wrap JSON in a code fence,
+ * or put the string "yes" where a boolean belongs. Spelling out the exact shape
+ * — and what not to do — is worth more here than brevity.
+ */
+function buildInstruction(question: string): string {
+    return [
+        'You are a strict visual classifier. Look at the screenshot and decide whether',
+        'the following statement is TRUE or FALSE for what you see.',
+        '',
+        `STATEMENT: ${question}`,
+        '',
+        'Reply with exactly one JSON object and nothing else.',
+        'No prose. No explanation before or after. No markdown. No ``` code fence.',
+        '',
+        'The object must have exactly these two keys:',
+        '  "match"  - the JSON boolean true or false. Not "true", not "yes", not 1.',
+        '  "reason" - a string, at most 10 words.',
+        '',
+        'Valid replies look exactly like this:',
+        '{"match": true, "reason": "the left button is green"}',
+        '{"match": false, "reason": "the button is grey"}',
+        '',
+        'Use true only when the statement is clearly true in the screenshot.',
+        'If you are unsure, or cannot see the thing being asked about, use false.',
+    ].join('\n');
+}
 
 let promisified = false;
 
@@ -57,9 +78,32 @@ interface AsyncSoupSession {
     ): Promise<GLib.Bytes>;
 }
 
+/** Keys small models reach for when they ignore the one we asked for. */
+const VERDICT_KEYS = ['match', 'answer', 'result', 'value', 'verdict', 'is_true', 'true'];
+
+function toBool(value: unknown): boolean | null {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+    if (typeof value === 'number') {
+        return value !== 0;
+    }
+    if (typeof value === 'string') {
+        const text = value.trim().toLowerCase();
+        if (['true', 'yes', 'y', '1'].includes(text)) {
+            return true;
+        }
+        if (['false', 'no', 'n', '0'].includes(text)) {
+            return false;
+        }
+    }
+    return null;
+}
+
 /**
- * Parse the model's answer. Models drift from the requested format constantly,
- * so accept a bare JSON object, a fenced one, or a plain YES/NO.
+ * Read the model's answer. Even with JSON mode on, small models produce fenced
+ * blocks, stringly-typed booleans, alternate key names and trailing chatter, so
+ * this accepts all of those before falling back to a plain YES/NO.
  */
 export function parseVerdict(text: string): { match: boolean; reason: string } | null {
     const trimmed = (text ?? '').trim();
@@ -67,24 +111,22 @@ export function parseVerdict(text: string): { match: boolean; reason: string } |
         return null;
     }
 
-    const jsonMatch = /\{[\s\S]*\}/.exec(trimmed);
-    if (jsonMatch) {
+    // Non-greedy from the first brace: models sometimes emit a second object
+    // after the first, and JSON.parse would choke on the pair.
+    for (const candidate of trimmed.match(/\{[\s\S]*?\}/g) ?? []) {
         try {
-            const parsed = JSON.parse(jsonMatch[0]) as { match?: unknown; reason?: unknown };
-            if (typeof parsed.match === 'boolean') {
-                return { match: parsed.match, reason: String(parsed.reason ?? '') };
-            }
-            if (typeof parsed.match === 'string') {
-                const value = parsed.match.trim().toLowerCase();
-                if (value === 'true' || value === 'yes') {
-                    return { match: true, reason: String(parsed.reason ?? '') };
-                }
-                if (value === 'false' || value === 'no') {
-                    return { match: false, reason: String(parsed.reason ?? '') };
+            const parsed = JSON.parse(candidate) as Record<string, unknown>;
+            const reason = String(parsed.reason ?? parsed.explanation ?? '');
+            for (const key of VERDICT_KEYS) {
+                if (key in parsed) {
+                    const value = toBool(parsed[key]);
+                    if (value !== null) {
+                        return { match: value, reason };
+                    }
                 }
             }
         } catch {
-            // Fall through to the plain-text reading.
+            // Try the next object, then fall through to the plain-text reading.
         }
     }
 
@@ -99,6 +141,7 @@ export function parseVerdict(text: string): { match: boolean; reason: string } |
 
 export class LlmClient {
     private _session: Soup.Session;
+    private _jsonMode = true;
 
     constructor() {
         ensurePromisified();
@@ -114,7 +157,7 @@ export class LlmClient {
             throw new LlmError('no LLM endpoint configured');
         }
 
-        const body = {
+        const body: Record<string, unknown> = {
             model: settings.model,
             temperature: 0,
             max_tokens: 96,
@@ -122,12 +165,19 @@ export class LlmClient {
                 {
                     role: 'user',
                     content: [
-                        { type: 'text', text: `${INSTRUCTION}\n\nQuestion: ${prompt}` },
+                        { type: 'text', text: buildInstruction(prompt) },
                         { type: 'image_url', image_url: { url: image.dataUri } },
                     ],
                 },
             ],
         };
+
+        // Constrained decoding, where the server supports it, is far more
+        // reliable than asking nicely. Servers that do not understand the field
+        // reject the request, so we remember that and stop sending it.
+        if (this._jsonMode) {
+            body.response_format = { type: 'json_object' };
+        }
 
         const message = Soup.Message.new('POST', settings.endpoint);
         if (!message) {
@@ -161,6 +211,11 @@ export class LlmClient {
             const text = new TextDecoder().decode(bytes.get_data() ?? new Uint8Array(0));
 
             if (status !== Soup.Status.OK) {
+                if (this._jsonMode && status === 400) {
+                    log('clickmate: endpoint rejected response_format, retrying without JSON mode');
+                    this._jsonMode = false;
+                    return this.ask(prompt, image, settings);
+                }
                 throw new LlmError(`HTTP ${status}: ${text.slice(0, 200)}`);
             }
 
@@ -194,7 +249,7 @@ export class LlmClient {
                 throw new LlmError(`could not read a yes/no answer from: ${content.slice(0, 200)}`);
             }
 
-            return { match: parsed.match, reason: parsed.reason, raw: content, latencyMs };
+            return { match: parsed.match, reason: parsed.reason, latencyMs };
         } catch (error) {
             if (timedOut) {
                 throw new LlmError(`timed out after ${settings.timeoutMs}ms`);
