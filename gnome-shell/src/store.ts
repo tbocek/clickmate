@@ -35,7 +35,7 @@ export class MacroStore {
     private _doc: MacroDocument;
     private _changedId: number;
     private _writing = false;
-    private _listeners = new Set<() => void>();
+    private _listeners = new Set<(external: boolean) => void>();
 
     constructor(settings: Gio.Settings) {
         this._settings = settings;
@@ -45,8 +45,10 @@ export class MacroStore {
             if (this._writing) {
                 return; // our own write echoing back
             }
+            // Written by the other process: every step object we handed out is
+            // now stale, so listeners have to rebuild rather than refresh.
             this._doc = parseDocument(this._settings.get_string('macros'));
-            this._notify();
+            this._notify(true);
         });
     }
 
@@ -70,16 +72,19 @@ export class MacroStore {
         return this._doc.macros;
     }
 
-    /** Called whenever the document changes, from either process. */
-    onChanged(listener: () => void): () => void {
+    /**
+     * Called whenever the document changes. `external` is true when the other
+     * process wrote it, which means the in-memory objects were replaced.
+     */
+    onChanged(listener: (external: boolean) => void): () => void {
         this._listeners.add(listener);
         return () => this._listeners.delete(listener);
     }
 
-    private _notify(): void {
+    private _notify(external: boolean): void {
         for (const listener of [...this._listeners]) {
             try {
-                listener();
+                listener(external);
             } catch (error) {
                 logError(error as Error, 'clickmate: store listener failed');
             }
@@ -94,7 +99,7 @@ export class MacroStore {
         } finally {
             this._writing = false;
         }
-        this._notify();
+        this._notify(false);
     }
 
     replaceDocument(doc: MacroDocument): void {
