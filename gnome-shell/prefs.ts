@@ -240,6 +240,52 @@ function iconButton(iconName: string, tooltip: string, onClick: () => void): Gtk
     return button;
 }
 
+/**
+ * A ⓘ that opens a popover. For guidance too long for a subtitle and too small
+ * for documentation nobody opens, kept next to the field it is about.
+ */
+function infoButton(tooltip: string, markup: string): Gtk.MenuButton {
+    const label = new Gtk.Label({
+        label: markup,
+        use_markup: true,
+        wrap: true,
+        xalign: 0,
+        max_width_chars: 46,
+        margin_top: 12,
+        margin_bottom: 12,
+        margin_start: 12,
+        margin_end: 12,
+    });
+    return new Gtk.MenuButton({
+        icon_name: 'help-about-symbolic',
+        tooltip_text: tooltip,
+        valign: Gtk.Align.CENTER,
+        css_classes: ['flat'],
+        popover: new Gtk.Popover({ child: label }),
+    });
+}
+
+/**
+ * What actually decides whether a check works. The instruction sent with the
+ * picture asks for true or false about these words, so a statement lands and a
+ * question invites prose — which is the failure people hit first.
+ */
+const PROMPT_HELP = [
+    '<b>Write a statement, not a question.</b>',
+    '',
+    'The screenshot is sent with instructions to answer nothing but true or false about the words you put here.',
+    '',
+    '<b>Lands:</b>  the button on the left is green',
+    '<b>Fragile:</b>  Is the button on the left green?',
+    '',
+    '• One visible fact at a time. “green and enabled” gives the model room to be half right.',
+    '• Say where it is: “the button at the bottom right”.',
+    '• Skip “not”. Set <b>Proceed when the answer is</b> to No instead.',
+    '• Reading the reply is lenient: yes, YES, true, 1 and a JSON object are all understood, in any case. Only a reply with no yes or no anywhere in it counts as a failure, and then <b>If the request fails</b> decides what happens.',
+    '',
+    'A tight <b>Screen area</b> helps more than any wording.',
+].join('\n');
+
 /** What highlighting a running step needs to get at, per step id. */
 interface StepRow {
     row: Adw.ExpanderRow;
@@ -1000,10 +1046,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 break;
 
             case 'llm': {
-                rows.push(entryRow(_('Prompt'), condition.prompt, text => {
+                const promptRow = entryRow(_('Prompt'), condition.prompt, text => {
                     condition.prompt = text;
                     save();
-                }));
+                });
+                promptRow.add_suffix(infoButton(_('How to word this'), PROMPT_HELP));
+                rows.push(promptRow);
                 rows.push(comboRow(_('Proceed when the answer is'), ['yes', 'no'] as const,
                     { yes: _('Yes'), no: _('No') },
                     condition.expect === false ? 'no' : 'yes', value => {

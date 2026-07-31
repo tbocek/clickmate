@@ -210,7 +210,10 @@ export function newCondition(type: ConditionType): Condition {
         case 'llm':
             return {
                 type: 'llm',
-                prompt: 'Is the button on the left green?',
+                // A statement, not a question: it is what the model is asked to
+                // call true or false, and it is the example every new condition
+                // starts from.
+                prompt: 'the button on the left is green',
                 region: null,
                 expect: true,
                 onError: 'false',
