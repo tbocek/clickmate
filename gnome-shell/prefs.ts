@@ -65,13 +65,22 @@ function homeFile(name: string): string {
  * width itself, which is what the setting has always held.
  */
 const SCALE_WIDTHS = ['854', '1280', '1920', '2560', '3840'] as const;
-const SCALE_LABELS: Record<string, string> = {
-    '854': _('480p — 854 px wide'),
-    '1280': _('720p — 1280 px wide'),
-    '1920': _('1080p — 1920 px wide'),
-    '2560': _('1440p — 2560 px wide'),
-    '3840': _('4K — 3840 px wide'),
-};
+
+/**
+ * Built when asked for, not held in a constant: gettext refuses to run while
+ * this module is still being imported — it identifies the extension from the
+ * call stack, and the object it would translate for does not exist yet — so a
+ * top-level table of translated strings takes the whole window down with it.
+ */
+function scaleLabels(): Record<string, string> {
+    return {
+        '854': _('480p — 854 px wide'),
+        '1280': _('720p — 1280 px wide'),
+        '1920': _('1080p — 1920 px wide'),
+        '2560': _('1440p — 2560 px wide'),
+        '3840': _('4K — 3840 px wide'),
+    };
+}
 
 /**
  * The nearest listed width that is not *smaller* than the stored one. Settings
@@ -1540,7 +1549,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         if (Number(scale) !== this._settings.get_int('llm-max-width')) {
             this._settings.set_int('llm-max-width', Number(scale));   // so the row is not lying
         }
-        imageGroup.add(comboRow(_('Scale down to'), SCALE_WIDTHS, SCALE_LABELS, scale, value => {
+        imageGroup.add(comboRow(_('Scale down to'), SCALE_WIDTHS, scaleLabels(), scale, value => {
             this._settings.set_int('llm-max-width', Number(value));
         }));
         page.add(imageGroup);

@@ -20,7 +20,7 @@
     "dev": "nodemon --exec 'sh -c \"pnpm run build\"' --ext ts,json,js --ignore dist/",
     "dist": "pnpm run build && cd dist && zip ../clickmate.zip -9r .",
     "install": "./run.sh -i",
-    "test": "npm run build && gjs -m test/smoke.mjs && gjs -m test/recording.mjs && gjs -m test/resume.mjs"
+    "test": "npm run build && gjs -m test/smoke.mjs && gjs -m test/recording.mjs && gjs -m test/resume.mjs && GI_TYPELIB_PATH=/usr/lib/gnome-shell/girepository-1.0 LD_LIBRARY_PATH=/usr/lib/gnome-shell gjs -m test/prefsload.mjs"
   },
   "devDependencies": {
     "dotenv-cli": "^8.0.0",
