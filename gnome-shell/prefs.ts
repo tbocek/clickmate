@@ -938,9 +938,13 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         }
     }
 
-    /** Is this body open on screen? What move up and down mean depends on it. */
+    /**
+     * Is this body open on screen? What move up and down mean depends on it.
+     * A block hidden under a collapsed if is as closed as a folded one.
+     */
     private _isBranchOpen(stepId: string, listKey: string): boolean {
-        return this._branchRows.get(`${stepId}:${listKey}`)?.get_expanded() ?? false;
+        const row = this._branchRows.get(`${stepId}:${listKey}`);
+        return !!row && row.get_visible() && row.get_expanded();
     }
 
     /**
@@ -1101,7 +1105,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         }));
 
         const addRow = new Adw.ActionRow({
-            title: _('The end of the macro'),
+            title: _('Add a step here'),
             subtitle: _('Steps and recordings land here'),
         });
         const recordButton = new Gtk.Button({
@@ -1121,8 +1125,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 group.add(widget);
             }
         }
-        // Under the steps, where what it adds will appear: a row saying "the end
-        // of the macro" belongs at the end of the macro.
+        // Under the steps, where what it adds will appear.
         group.add(addRow);
 
         return group;
@@ -1202,7 +1205,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         const fields = this._buildStepFields(macro, step);
         const props = { title: this._describe(step), subtitle: this._stepSubtitle(step) };
         const row: Adw.ActionRow | Adw.ExpanderRow = fields.length > 0 || inline
-            ? this._expander(stepKey, props, inline && children[0].steps.length > 0)
+            ? this._expander(stepKey, props,
+                inline ? children[0].steps.length > 0 : children.length > 0)
             : new Adw.ActionRow(props);
         const widgets: Gtk.Widget[] = [row];
         const branchRows: Adw.ExpanderRow[] = [];
@@ -1336,10 +1340,11 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             nested.add_css_class(`clickmate-branch-${kind}`);
             this._branchRows.set(`${step.id}:${list.key}`, nested);
 
+            // Worded exactly like the macro's own add row: the two do the same
+            // thing, and reading two different labels suggested they did not.
             const addNested = new Adw.ActionRow({
                 title: _('Add a step here'),
-                // Where the selection goes when a loop has no header to click.
-                subtitle: inline ? _('Steps and recordings land here') : '',
+                subtitle: _('Steps and recordings land here'),
             });
             addNested.set_margin_start(INDENT_PX);   // lines up with the steps below it
             addNested.add_prefix(new Gtk.Image({
@@ -1367,6 +1372,19 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             }
             // Last, because that is where what it adds ends up.
             nested.add_row(addNested);
+        }
+
+        // An if's blocks sit beside its row, not inside it (that is how the
+        // rails line up), so its chevron would fold only the condition editor
+        // and leave both blocks standing. Have them follow it by hand.
+        if (branchRows.length > 0 && row instanceof Adw.ExpanderRow) {
+            const follow = () => {
+                for (const branch of branchRows) {
+                    branch.set_visible(row.get_expanded());
+                }
+            };
+            row.connect('notify::expanded', follow);
+            follow();
         }
 
         return widgets;
