@@ -44,7 +44,7 @@ export class ConditionEvaluator {
         this._llm.destroy();
     }
 
-    /** Evaluate a condition tree. Throws ConditionAborted for onError:'abort'. */
+    /** Evaluate a condition tree. Throws when a check cannot be answered. */
     async evaluate(condition: Condition | null | undefined): Promise<boolean> {
         if (!condition) {
             return true;
@@ -153,26 +153,18 @@ export class ConditionEvaluator {
             const image = encodeForLlm(pixbuf, this._config.llmMaxWidth);
             const verdict = await this._llm.ask(condition.prompt, image, settings);
 
-            const expect = condition.expect !== false;
-            const result = verdict.match === expect;
             const detail = `model said ${verdict.match ? 'yes' : 'no'}${verdict.reason ? ` — ${verdict.reason}` : ''} (${verdict.latencyMs}ms)`;
-            return { result, detail };
+            return { result: verdict.match, detail };
         } catch (error) {
             const message = error instanceof LlmError ? error.message : (error as Error).message;
-            const policy = condition.onError ?? 'false';
-            if (policy === 'abort') {
-                throw new Error(`LLM check failed: ${message}`);
-            }
-            // Counting the check as `policy` is what the step asked for, but on
-            // its own it is invisible: an unconfigured model just makes the macro
-            // take the empty branch for ever and look like it does nothing.
+            // A failed check has no answer, and guessing one either way sends the
+            // macro down a branch on no evidence. Say so and stop.
             reportProblem('Model', message, {
                 where: describeCondition(condition),
-                hint: `The check counted as “${policy === 'true' ? 'yes' : 'no'}”. ` +
-                    `Clickmate asked ${settings.endpoint || '(no endpoint set)'} — start that server, ` +
-                    'point Settings → Model somewhere else, or replace the check with a pixel colour test.',
+                hint: `Clickmate asked ${settings.endpoint || '(no endpoint set)'} — start that server, ` +
+                    'point Settings → Model somewhere else, or replace the check with a colour test.',
             });
-            return { result: policy === 'true', detail: `error: ${message}` };
+            throw new Error(`the model could not answer: ${message}`);
         }
     }
 }

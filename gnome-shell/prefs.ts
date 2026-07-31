@@ -128,12 +128,12 @@ const BRANCH_STYLE: Record<BranchKind, { icon: string; title: string; hint: stri
     },
     then: {
         icon: 'object-select-symbolic',
-        title: 'Then',
-        hint: 'runs when the condition holds',
+        title: 'Yes',
+        hint: 'runs when the check holds',
     },
     else: {
         icon: 'window-close-symbolic',
-        title: 'Else',
+        title: 'No',
         hint: 'runs when it does not',
     },
 };
@@ -1016,7 +1016,16 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const kindIcon = STEP_ICONS[step.kind];
         const icon = new Gtk.Image({ icon_name: kindIcon, valign: Gtk.Align.CENTER });
-        row.add_prefix(icon);
+
+        // Affixes go in boxes of our own rather than one add_prefix/add_suffix
+        // call each: AdwActionRow and AdwExpanderRow pack them in opposite
+        // directions, so the same code produced mirrored rows depending on
+        // whether the step had settings to fold open.
+        const prefixes = new Gtk.Box({ spacing: 6, valign: Gtk.Align.CENTER });
+        const suffixes = new Gtk.Box({ spacing: 0, valign: Gtk.Align.CENTER });
+        prefixes.append(icon);
+        row.add_prefix(prefixes);
+        row.add_suffix(suffixes);
         this._stepRows.set(step.id, {
             row,
             icon,
@@ -1042,13 +1051,15 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             row.set_subtitle(this._stepSubtitle(step));
             this._save();
         });
-        row.add_prefix(enabled);
+        prefixes.append(enabled);
 
         // A repeat has exactly one setting, so it lives on the row rather than
         // behind a fold: the count, and a toggle for having no count at all.
         if (step.kind === 'loop') {
             const forever = new Gtk.ToggleButton({
-                icon_name: 'media-playlist-repeat-symbolic',
+                // Not the loop's own kind icon, which already sits on this row:
+                // repeat-song is the "keep going" variant of the same family.
+                icon_name: 'media-playlist-repeat-song-symbolic',
                 tooltip_text: _('Repeat without a limit'),
                 active: step.count === 'forever',
                 valign: Gtk.Align.CENTER,
@@ -1079,12 +1090,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 row.set_title(describeStep(step));
                 this._save();
             });
-            row.add_suffix(count);
-            row.add_suffix(forever);
+            suffixes.append(forever);
+            suffixes.append(count);
         }
 
         if (RUNNABLE_ALONE.includes(step.kind)) {
-            row.add_suffix(iconButton('media-playback-start-symbolic',
+            suffixes.append(iconButton('media-playback-start-symbolic',
                 _('Do this one step now, on the real screen'),
                 () => this._runStepNow(macro.id, step)));
         }
@@ -1093,19 +1104,19 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // you see is what a press does, which is why the editor decides and the
         // model only asks.
         const open = (stepId: string, listKey: string) => this._isBranchOpen(stepId, listKey);
-        row.add_suffix(iconButton('go-up-symbolic',
+        suffixes.append(iconButton('go-up-symbolic',
             _('Move up — into an open body above, or past a folded one'), () => {
                 if (moveStepNested(macro.body, step.id, -1, open)) {
                     this._saveAndRebuild();
                 }
             }));
-        row.add_suffix(iconButton('go-down-symbolic',
+        suffixes.append(iconButton('go-down-symbolic',
             _('Move down — into an open body below, or past a folded one'), () => {
                 if (moveStepNested(macro.body, step.id, 1, open)) {
                     this._saveAndRebuild();
                 }
             }));
-        row.add_suffix(iconButton('user-trash-symbolic', _('Delete'), () => {
+        suffixes.append(iconButton('user-trash-symbolic', _('Delete'), () => {
             removeStep(macro.body, step.id);
             this._saveAndRebuild();
         }));
@@ -1342,12 +1353,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 promptRow.add_suffix(infoButton(
                     _('How to word this, and what is actually sent'), promptHelp(), 64));
                 rows.push(promptRow);
-                rows.push(comboRow(_('Proceed when the answer is'), ['yes', 'no'] as const,
-                    { yes: _('Yes'), no: _('No') },
-                    condition.expect === false ? 'no' : 'yes', value => {
-                        condition.expect = value === 'yes';
-                        rebuild();
-                    }));
 
                 const areaRow = new Adw.ActionRow({
                     title: _('Screen area'),
@@ -1374,14 +1379,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 }
                 rows.push(areaRow);
 
-                rows.push(comboRow(_('If the request fails'), ['false', 'true', 'abort'] as const, {
-                    'false': _('Treat as no'),
-                    'true': _('Treat as yes'),
-                    'abort': _('Stop the macro'),
-                }, condition.onError ?? 'false', value => {
-                    condition.onError = value;
-                    rebuild();
-                }));
                 break;
             }
 

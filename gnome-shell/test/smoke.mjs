@@ -263,6 +263,21 @@ check('a loop with a break reaches the end', reachesEnd([
     loopStep({ body: [{ id: 'b', kind: 'break' }] })]));
 check('stop ends the list', !reachesEnd([mk('click'), { id: 's', kind: 'stop' }]));
 
+// "proceed when the answer is no" was an inversion, so it becomes `not`
+const invDoc = JSON.stringify({ version: 1, macros: [{ id: 'm', name: 'i', body: [
+    { id: 'a', kind: 'if', cond: { type: 'llm', prompt: 'ready?', expect: false, onError: 'abort' },
+      then: [], else: [] },
+    { id: 'b', kind: 'if', cond: { type: 'llm', prompt: 'ready?', expect: true, onError: 'false' },
+      then: [], else: [] },
+] }] });
+const inv = parseDocument(invDoc).macros[0].body;
+check('expect:false becomes not', inv[0].cond.type === 'not' && inv[0].cond.of.type === 'llm',
+      JSON.stringify(inv[0].cond.type));
+check('the inverted prompt survives', inv[0].cond.of.prompt === 'ready?');
+check('expect:true stays a plain check', inv[1].cond.type === 'llm');
+check('expect is gone', inv[0].cond.of.expect === undefined && inv[1].cond.expect === undefined);
+check('onError is gone', inv[0].cond.of.onError === undefined && inv[1].cond.onError === undefined);
+
 // coordinate field parsing
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 check('numbers comma', eq(parseNumbers('100, 200', 2), [100, 200]));

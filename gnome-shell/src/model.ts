@@ -25,10 +25,6 @@ export interface LlmCondition {
     prompt: string;
     /** null/undefined means "the whole screen". */
     region?: Region | null;
-    /** Invert the answer: expect:false means "proceed when the answer is NO". */
-    expect?: boolean;
-    /** What to do when the request fails or times out. */
-    onError?: 'false' | 'true' | 'abort';
 }
 
 /**
@@ -214,8 +210,6 @@ export function newCondition(type: ConditionType): Condition {
                 // starts from.
                 prompt: 'the button on the left is green',
                 region: null,
-                expect: true,
-                onError: 'false',
             };
         case 'color':
             return {
@@ -655,6 +649,18 @@ function migrateCondition(cond: Condition | null | undefined): Condition | null 
     if (!cond) {
         return null;
     }
+
+    // `expect: false` meant "proceed when the answer is NO", which is what `not`
+    // says. Dropping the field without this would silently invert the check.
+    const asked = cond as Condition & { expect?: boolean; onError?: string };
+    if (cond.type === 'llm') {
+        const inverted = asked.expect === false;
+        delete asked.expect;
+        delete asked.onError;
+        if (inverted) {
+            return { type: 'not', of: cond };
+        }
+    }
     // Deliberately erased to a plain record: the live union no longer has these
     // members, and narrowing against it would elide the checks below.
     const legacy = cond as unknown as {
@@ -878,7 +884,7 @@ export function describeCondition(cond: Condition | null | undefined): string {
         case 'always':
             return 'always';
         case 'llm':
-            return `${cond.expect === false ? 'LLM says no: ' : 'LLM: '}"${truncate(cond.prompt)}"`;
+            return `LLM: "${truncate(cond.prompt)}"`;
         case 'color':
             return cond.w * cond.h === 1
                 ? `pixel ${cond.x},${cond.y} ≈ ${cond.color}`
