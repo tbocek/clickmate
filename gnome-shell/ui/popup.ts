@@ -8,6 +8,7 @@ import St from 'gi://St';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import type { MacroStore } from '../src/store.js';
+import { describeStep, findStep } from '../src/model.js';
 import { clearProblems, listProblems, onProblemsChanged, type Problem } from '../src/problems.js';
 
 export interface PopupDeps {
@@ -15,7 +16,11 @@ export interface PopupDeps {
     isRunning: () => boolean;
     isPaused: () => boolean;
     isRecording: () => boolean;
+    /** Id of the step the next run will continue from, or '' to start at the top. */
+    resumeStep: () => string;
     onEnabledChanged: (enabled: boolean) => void;
+    /** Halt and forget the resume point, as opposed to the switch, which pauses. */
+    onStop: () => void;
     onOpenPreferences: () => void;
 }
 
@@ -38,11 +43,14 @@ function wrappingLabel(text: string, styleClass: string): St.Label {
 export class MacroPopup {
     private _deps: PopupDeps;
     private _switchItem: PopupMenu.PopupSwitchMenuItem;
+    /** The item's own title label. Real, but missing from the shell's typings. */
+    private _switchLabel: St.Label;
     private _statusLabel: St.Label;
     private _detailLabel: St.Label;
     private _updatingSwitch = false;
     private _message = '';
 
+    private _stopItem: PopupMenu.PopupMenuItem;
     private _problemItem: PopupMenu.PopupBaseMenuItem;
     private _problemHeader: St.Label;
     private _problemList: St.BoxLayout;
@@ -52,13 +60,18 @@ export class MacroPopup {
     constructor(deps: PopupDeps) {
         this._deps = deps;
 
-        this._switchItem = new PopupMenu.PopupSwitchMenuItem('Enabled', false);
+        this._switchItem = new PopupMenu.PopupSwitchMenuItem('Run', false);
+        this._switchLabel = (this._switchItem as unknown as { label: St.Label }).label;
         this._switchItem.connect('toggled', (_item, state: boolean) => {
             if (this._updatingSwitch) {
                 return;
             }
             this._deps.onEnabledChanged(state);
         });
+
+        this._stopItem = new PopupMenu.PopupMenuItem('Stop');
+        this._stopItem.connect('activate', () => this._deps.onStop());
+        this._stopItem.visible = false;   // nothing to stop until something runs
 
         this._statusLabel = new St.Label({ text: 'Idle', style_class: 'clickmate-status' });
         this._detailLabel = wrappingLabel('', 'clickmate-detail');
@@ -78,6 +91,7 @@ export class MacroPopup {
 
     addTo(menu: PopupMenu.PopupMenu): void {
         menu.addMenuItem(this._switchItem);
+        menu.addMenuItem(this._stopItem);
 
         const statusItem = new PopupMenu.PopupBaseMenuItem({ reactive: false, can_focus: false });
         const box = new St.BoxLayout({ vertical: true, style_class: 'clickmate-status-box' });
@@ -120,20 +134,31 @@ export class MacroPopup {
 
     refresh(): void {
         const running = this._deps.isRunning();
+        const macro = this._deps.store.activeMacro;
+
+        // Where the next run would pick up. Only meaningful for the macro that
+        // holds the step: a point left over from another one reads as idle.
+        const resumeId = this._deps.resumeStep();
+        const resumeAt = macro && resumeId ? findStep(macro.body, resumeId)?.step : undefined;
 
         this._updatingSwitch = true;
         this._switchItem.setToggleState(running);
         this._updatingSwitch = false;
+        // The switch is the same key either way; the word just says which of the
+        // two it will do next.
+        this._switchLabel.text = !running && resumeAt ? 'Continue' : 'Run';
+        this._stopItem.visible = running || resumeAt !== undefined;
 
-        const macro = this._deps.store.activeMacro;
         if (this._deps.isRecording()) {
             this._statusLabel.text = macro ? `Recording into “${macro.name}”` : 'Recording';
         } else if (running && this._deps.isPaused()) {
-            this._statusLabel.text = macro ? `Paused — “${macro.name}”` : 'Paused';
+            this._statusLabel.text = macro ? `Holding — “${macro.name}”` : 'Holding';
         } else if (running) {
             this._statusLabel.text = macro ? `Running “${macro.name}”` : 'Running';
         } else if (!macro) {
             this._statusLabel.text = 'No macro selected';
+        } else if (resumeAt) {
+            this._statusLabel.text = `Paused at ${describeStep(resumeAt)}`;
         } else {
             this._statusLabel.text = `Idle — “${macro.name}” selected`;
         }

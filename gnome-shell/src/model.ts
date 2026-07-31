@@ -304,6 +304,27 @@ export function walk(
     });
 }
 
+/**
+ * The chain of ids from the top of `list` down to `id`, outermost first, or an
+ * empty array if the step is not in there. This is what lets a run start in the
+ * middle of a nested body: the runner needs to know which loop and which branch
+ * to descend into, not just which step to stop skipping at.
+ */
+export function pathToStep(list: Step[], id: string): string[] {
+    for (const step of list) {
+        if (step.id === id) {
+            return [step.id];
+        }
+        for (const child of childLists(step)) {
+            const inner = pathToStep(child.steps, id);
+            if (inner.length > 0) {
+                return [step.id, ...inner];
+            }
+        }
+    }
+    return [];
+}
+
 export function findStep(list: Step[], id: string): StepLocation | null {
     let found: StepLocation | null = null;
     walk(list, loc => {

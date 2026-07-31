@@ -30,7 +30,7 @@ import type {
     TextStep,
     WaitStep,
 } from './model.js';
-import { describeStep } from './model.js';
+import { describeStep, findStep, pathToStep } from './model.js';
 import { reportProblem } from './problems.js';
 import type { Config } from './store.js';
 
@@ -81,6 +81,13 @@ export class MacroRunner {
     private _paused = false;
     private _path: RunningStep[] = [];
     private _failedAt = '';
+    private _failedStepId = '';
+    /**
+     * Ids from the macro body down to the step this run starts at, outermost
+     * first. Consumed on the way down and empty for the rest of the run, so
+     * only the first pass through each list is affected.
+     */
+    private _resume: string[] = [];
 
     constructor(
         daemon: DaemonClient,
@@ -105,6 +112,19 @@ export class MacroRunner {
     }
 
     /**
+     * The innermost step being executed right now, or '' when nothing is. Read
+     * before stopping a run, to record where to pick it up again.
+     */
+    get currentStepId(): string {
+        return this._path.length > 0 ? this._path[this._path.length - 1].id : '';
+    }
+
+    /** The step that threw, after a run ended in an error. */
+    get failedStepId(): string {
+        return this._failedStepId;
+    }
+
+    /**
      * Hold between steps for as long as the pause check says so — used while the
      * pointer is over our own menu, so a macro cannot click its own UI. Polled
      * rather than signalled: the alternative was making the menu actor reactive
@@ -116,7 +136,9 @@ export class MacroRunner {
             if (!announced) {
                 announced = true;
                 this._paused = true;
-                this._status('Paused — pointer is over the menu');
+                // Not "paused": that word now belongs to the deliberate kind,
+                // the one you continue from. This is the run holding its breath.
+                this._status('Holding — pointer is over the menu');
             }
             await this._sleep(PAUSE_POLL_MS);
         }
@@ -132,7 +154,12 @@ export class MacroRunner {
 
     // --- lifecycle ---------------------------------------------------------
 
-    async run(macro: Macro): Promise<void> {
+    /**
+     * `resumeAt` is the id of a step to start at instead of the beginning. A step
+     * that is not in this macro — one left over from an edit, or from a different
+     * macro — starts the run from the top rather than not running at all.
+     */
+    async run(macro: Macro, resumeAt = ''): Promise<void> {
         if (this._running) {
             return;
         }
@@ -142,8 +169,16 @@ export class MacroRunner {
         this._warnedAboutMotion = false;
         this._path = [];
         this._failedAt = '';
+        this._failedStepId = '';
+        this._resume = resumeAt ? pathToStep(macro.body, resumeAt) : [];
         this._callbacks.onRunningChanged?.(true);
-        this._status(`Running “${macro.name}”`);
+
+        const from = this._resume.length > 0
+            ? findStep(macro.body, resumeAt)?.step
+            : undefined;
+        this._status(from
+            ? `Running “${macro.name}” from ${describeStep(from)}`
+            : `Running “${macro.name}”`);
 
         let reason: FinishReason = 'done';
         let failure: Error | undefined;
@@ -229,12 +264,29 @@ export class MacroRunner {
 
     // --- interpreter -------------------------------------------------------
 
-    private async _runList(steps: Step[]): Promise<Signal> {
-        for (const step of steps) {
+    /**
+     * `depth` is how far down the resume chain this list sits. Only the first
+     * list at each depth can start part-way in: by the time a loop comes round
+     * again the chain has been consumed, so the second iteration runs whole.
+     */
+    private async _runList(steps: Step[], depth = 0): Promise<Signal> {
+        let index = 0;
+        if (depth < this._resume.length) {
+            const at = steps.findIndex(step => step.id === this._resume[depth]);
+            if (at < 0) {
+                // The macro was edited after the resume point was set. Running
+                // the whole list beats silently skipping it.
+                this._resume = [];
+            } else {
+                index = at;
+            }
+        }
+
+        for (; index < steps.length; index++) {
             if (this._cancelled) {
                 return 'stop';
             }
-            const signal = await this._runStep(step);
+            const signal = await this._runStep(steps[index], depth);
             if (signal !== 'normal') {
                 return signal;
             }
@@ -242,7 +294,13 @@ export class MacroRunner {
         return 'normal';
     }
 
-    private async _runStep(step: Step): Promise<Signal> {
+    private async _runStep(step: Step, depth = 0): Promise<Signal> {
+        // Arrived at the step this run was told to start from; everything from
+        // here on is an ordinary run.
+        if (this._resume.length === depth + 1 && this._resume[depth] === step.id) {
+            this._resume = [];
+        }
+
         await this._waitWhilePaused();
         if (this._cancelled) {
             return 'stop';
@@ -256,13 +314,14 @@ export class MacroRunner {
         this._path.push({ id: step.id, label: describeStep(step) });
         this._callbacks.onStepsChanged?.([...this._path]);
         try {
-            return await this._execute(step);
+            return await this._execute(step, depth);
         } catch (error) {
             // Each frame pops the path on the way out, so by the time run() sees
             // the throw the trail is gone. The innermost frame runs first, which
             // is why the first one to write wins.
             if (!this._failedAt) {
                 this._failedAt = this._where();
+                this._failedStepId = step.id;
             }
             throw error;
         } finally {
@@ -275,7 +334,7 @@ export class MacroRunner {
         return this._path.map(entry => entry.label).join(' › ');
     }
 
-    private async _execute(step: Step): Promise<Signal> {
+    private async _execute(step: Step, depth = 0): Promise<Signal> {
         switch (step.kind) {
             case 'click':
                 await this._doClick(step);
@@ -306,7 +365,7 @@ export class MacroRunner {
                         return 'normal';
                     }
                     iteration++;
-                    const signal = await this._runList(step.body);
+                    const signal = await this._runList(step.body, depth + 1);
                     if (signal === 'break') {
                         return 'normal';
                     }
@@ -320,11 +379,24 @@ export class MacroRunner {
             }
 
             case 'if': {
+                // Resuming into one of the branches: take the branch the resume
+                // point is in without asking the condition again. Re-evaluating
+                // could send the run down the other branch, which would skip the
+                // step you asked to continue from.
+                if (this._resume[depth] === step.id && this._resume.length > depth + 1) {
+                    const next = this._resume[depth + 1];
+                    const branch = step.then.some(s => s.id === next) ? step.then
+                        : (step.else ?? []).some(s => s.id === next) ? step.else ?? []
+                        : null;
+                    if (branch) {
+                        return this._runList(branch, depth + 1);
+                    }
+                }
                 const proceed = await this._evaluator.evaluate(step.cond);
                 if (this._cancelled) {
                     return 'stop';
                 }
-                return this._runList(proceed ? step.then : step.else ?? []);
+                return this._runList(proceed ? step.then : step.else ?? [], depth + 1);
             }
 
             case 'break':

@@ -49,7 +49,7 @@ const SETTINGS_FILE = 'clickmate-settings.json';
  * preferences uses to talk to the shell. Importing any of those would either
  * clobber the other export or replay a stale request.
  */
-const NOT_SETTINGS = ['macros', 'active-macro-id', 'running-steps'];
+const NOT_SETTINGS = ['macros', 'active-macro-id', 'running-steps', 'resume-step'];
 
 function isTransferableKey(key: string): boolean {
     return !NOT_SETTINGS.includes(key) && !key.endsWith('-request') && !key.endsWith('-result');
@@ -151,6 +151,13 @@ const EDITOR_CSS = `
 .clickmate-running-block { border-left: 4px solid @accent_bg_color; }
 .clickmate-running-icon { color: @accent_bg_color; }
 .clickmate-running-parent-icon { color: alpha(@accent_bg_color, 0.7); }
+
+/* Where the next run starts. Deliberately not the running colour: this one is
+   about a run that is not happening. */
+.clickmate-resume {
+    background-color: alpha(@warning_color, 0.22);
+    border-left: 4px solid @warning_color;
+}
 `;
 
 /** How far a step inside a body sits in from the rail of that body. */
@@ -322,6 +329,13 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     private _highlighted: string[] = [];
     private _runningChangedId = 0;
 
+    // The step the next run continues from — at most one, so the buttons behave
+    // like radio buttons that happen to be spread across the whole page.
+    private _resumeButtons = new Map<string, Gtk.ToggleButton>();
+    private _resumeMarked = '';
+    private _updatingResume = false;
+    private _resumeChangedId = 0;
+
     // Every page but Macros. Their rows read the settings once, when built, so
     // importing settings has to build them again to show what arrived.
     private _settingsPages: Adw.PreferencesPage[] = [];
@@ -445,6 +459,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // this can arrive several times a second without disturbing an edit.
         this._runningChangedId = this._settings.connect(
             'changed::running-steps', () => this._applyRunningHighlight());
+        this._resumeChangedId = this._settings.connect(
+            'changed::resume-step', () => this._applyResumeMark());
 
         window.connect('close-request', () => {
             this._closed = true;
@@ -452,6 +468,10 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             if (this._runningChangedId) {
                 this._settings.disconnect(this._runningChangedId);
                 this._runningChangedId = 0;
+            }
+            if (this._resumeChangedId) {
+                this._settings.disconnect(this._resumeChangedId);
+                this._resumeChangedId = 0;
             }
             this._store.destroy();
             return false;
@@ -493,6 +513,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._rebuilding = false;
         // Every row just went away, so nothing is highlighted any more either.
         this._stepRows.clear();
+        this._resumeButtons.clear();
         this._highlighted = [];
 
         const actions = new Adw.PreferencesGroup({
@@ -573,6 +594,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // A rebuild in the middle of a run — after a recording, say — must not
         // lose the marker on the step the runner is on.
         this._applyRunningHighlight();
+        this._applyResumeMark();
     }
 
     // --- running position --------------------------------------------------
@@ -600,6 +622,26 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._setRunState(entry, index === ids.length - 1 ? 'active' : 'ancestor');
             this._highlighted.push(id);
         });
+    }
+
+    /**
+     * Paint the step the next run starts at, and put the matching button in.
+     * Driven off the setting rather than off the button that was clicked: the
+     * shell writes to the same key when a run is paused or fails, and this way
+     * that shows up in the editor with no extra plumbing.
+     */
+    private _applyResumeMark(): void {
+        const id = this._settings.get_string('resume-step');
+
+        this._updatingResume = true;
+        for (const [stepId, button] of this._resumeButtons) {
+            button.set_active(stepId === id);
+        }
+        this._updatingResume = false;
+
+        this._stepRows.get(this._resumeMarked)?.row.remove_css_class('clickmate-resume');
+        this._resumeMarked = id;
+        this._stepRows.get(id)?.row.add_css_class('clickmate-resume');
     }
 
     private _runningStepIds(): string[] {
@@ -782,6 +824,24 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._save();
         });
         row.add_prefix(enabled);
+
+        // Marks where the next run picks up. At most one step in the document
+        // carries it, so turning this one on turns any other one off — through
+        // the setting, which is what the shell reads.
+        const resume = new Gtk.ToggleButton({
+            icon_name: 'go-jump-symbolic',
+            tooltip_text: _('Start the next run here instead of at the top'),
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        resume.connect('toggled', () => {
+            if (this._updatingResume) {
+                return; // we are the ones setting it, from the setting itself
+            }
+            this._settings.set_string('resume-step', resume.get_active() ? step.id : '');
+        });
+        this._resumeButtons.set(step.id, resume);
+        row.add_suffix(resume);
 
         row.add_suffix(iconButton('go-up-symbolic', _('Move up'), () => {
             if (moveStep(macro.body, step.id, -1)) {

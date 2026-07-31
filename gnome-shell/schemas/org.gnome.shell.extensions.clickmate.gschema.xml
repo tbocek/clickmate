@@ -26,6 +26,17 @@
             <description>Internal: JSON list of the step ids the runner is currently inside</description>
         </key>
 
+        <!-- Where the next run starts. Set by pausing, by the failing step when a
+             run stops on an error, or by hand in the editor; cleared by Stop and
+             by a run that reaches the end. Empty means start at the top. Shared
+             between the two processes because the editor is what shows it and
+             the shell is what acts on it. -->
+        <key name="resume-step" type="s">
+            <default>''</default>
+            <summary>Step to continue from</summary>
+            <description>Id of the step the next run starts at, or empty to start at the beginning</description>
+        </key>
+
         <!-- Preferences cannot see or draw on the screen from its own process,
              so each of these is a serialled JSON request to the shell, answered
              on the matching -result key. -->
@@ -74,8 +85,8 @@
 
         <key name="run-macro" type="as">
             <default><![CDATA[['<Control><Shift>F6']]]></default>
-            <summary>Run or stop the selected macro</summary>
-            <description>Keyboard shortcut that toggles playback of the selected macro</description>
+            <summary>Run or pause the selected macro</summary>
+            <description>Starts the selected macro, or pauses a running one. Pressing it again continues from the step it paused on; Stop in the panel menu goes back to starting at the top.</description>
         </key>
 
         <key name="record-toggle" type="as">

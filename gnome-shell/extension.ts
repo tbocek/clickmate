@@ -84,11 +84,23 @@ export default class ClickmateExtension extends Extension {
             onStepsChanged: path => this._onStepsChanged(path),
             shouldPause: () => this._isPointerOverMenu(),
             onFinished: (reason, error) => {
+                if (reason === 'done') {
+                    // Ran to the end, so there is nothing left to continue from.
+                    this._resumeStep = '';
+                } else if (reason === 'error') {
+                    // Continue from the step that threw: you fix it, then press
+                    // the shortcut again rather than replaying everything before.
+                    this._resumeStep = this._runner?.failedStepId ?? '';
+                }
+                // 'stopped' leaves the key alone — pause has just written the
+                // step to it, and Stop has just cleared it.
+
                 // The runner has already filed the problem; this is only the
                 // interruption, for the case where the menu is closed.
                 if (reason === 'error' && error) {
                     Main.notify('Clickmate', `Macro failed: ${error.message}`);
                 }
+                this._popup?.refresh();
             },
         });
         this._recorder = new Recorder(this._daemon, config, {
@@ -195,13 +207,15 @@ export default class ClickmateExtension extends Extension {
             isRunning: () => this._runner?.running ?? false,
             isPaused: () => this._runner?.paused ?? false,
             isRecording: () => this._recorder?.recording ?? false,
+            resumeStep: () => this._resumeStep,
             onEnabledChanged: enabled => {
                 if (enabled) {
                     this._runActiveMacro();
                 } else {
-                    this._runner?.stop();
+                    this._pauseMacro();
                 }
             },
+            onStop: () => this._stopMacro(),
             onOpenPreferences: () => {
                 this._indicator?.menu.close(true);
                 this.openPreferences();
@@ -319,6 +333,12 @@ export default class ClickmateExtension extends Extension {
 
     // --- actions -----------------------------------------------------------
 
+    /**
+     * The one toggle behind both the shortcut and the popup switch: start, or
+     * pause. Pausing is not a suspend — the run ends — but it writes down the
+     * step it was on, so pressing the shortcut again picks up there instead of
+     * at the top. Stop is the separate action that throws that place away.
+     */
     private _runActiveMacro(): void {
         const macro = this._store?.activeMacro;
         if (!macro) {
@@ -327,13 +347,44 @@ export default class ClickmateExtension extends Extension {
             return;
         }
         if (this._runner?.running) {
-            this._runner.stop();
+            this._pauseMacro();
             return;
         }
         this._indicator?.menu.close(true);
         // We just closed it, so the pause check must not still think otherwise.
         this._menuOpen = false;
-        void this._runner?.run(macro);
+        void this._runner?.run(macro, this._resumeStep);
+    }
+
+    /** Halt, remembering the step it was on as where to continue from. */
+    private _pauseMacro(): void {
+        if (!this._runner?.running) {
+            return;
+        }
+        // Read before stopping: the path is cleared when the run unwinds.
+        this._resumeStep = this._runner.currentStepId;
+        this._runner.stop();
+        this._popup?.refresh();
+    }
+
+    /** Halt and forget where we were, so the next run starts at the top. */
+    private _stopMacro(): void {
+        this._resumeStep = '';
+        this._runner?.stop();
+        this._popup?.refresh();
+    }
+
+    /** Id of the step the next run starts at; '' means from the beginning. */
+    private get _resumeStep(): string {
+        return this._settings?.get_string('resume-step') ?? '';
+    }
+
+    private set _resumeStep(id: string) {
+        // Guarded because preferences redraws on every change of this key, and
+        // most writes here are the same value it already holds.
+        if (this._settings && this._settings.get_string('resume-step') !== id) {
+            this._settings.set_string('resume-step', id);
+        }
     }
 
     /**
@@ -531,7 +582,9 @@ export default class ClickmateExtension extends Extension {
                 break;
             case 'panic-stop':
                 this._recorder?.cancel();
-                this._runner?.stop();
+                // A full stop, not a pause: the emergency key should leave
+                // nothing armed to carry on from.
+                this._stopMacro();
                 if (this._recorder?.recording) {
                     void this._recorder.stop();
                 }
@@ -549,6 +602,11 @@ export default class ClickmateExtension extends Extension {
         }
         if (key === 'running-steps') {
             return; // our own write, several times a second while a macro runs
+        }
+        if (key === 'resume-step') {
+            // Preferences can set it too, by marking a step to continue from.
+            this._popup?.refresh();
+            return;
         }
         if (key === 'pick-region-request') {
             void this._answerRequest('pick-region', async () => ({ region: await pickRegion() }));

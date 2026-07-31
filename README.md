@@ -36,8 +36,10 @@ repeat forever:
 - **A full tree editor in preferences** — every step and condition, nested
   loops and `and`/`or`/`not`, plain-language summaries, enable/disable so you can
   bisect a macro instead of deleting from it, and JSON import/export.
-- **A panel popup that stays out of the way** — one switch, what is running, and a
-  way into the settings.
+- **A panel popup that stays out of the way** — a switch, a stop, what is
+  running, and a way into the settings.
+- **Pause and continue** — halting a run remembers the step it was on, and you
+  can mark any step in the editor as where the next run starts.
 - **Emergency stop** that aborts mid-macro and releases every held key.
 
 ## How it fits together
@@ -159,21 +161,42 @@ model actually said.
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+F5` | Open the popup |
-| `Ctrl+Shift+F6` | Run / stop the selected macro |
+| `Ctrl+Shift+F6` | Run the selected macro / pause it / continue |
 | `Ctrl+Shift+R` | Start / stop recording into the selected macro |
 | `Ctrl+Shift+M` | Capture one click or move, appended to the selected macro |
 | `Super+Escape` | Emergency stop |
 
-The panel popup holds only a master switch, the name of whatever is running, and a
-**Settings** button. It is also where progress shows up: the current step, the
-last condition verdict, "Recorded 3 steps". That text is kept after the fact,
-because most of it happens while the menu is closed — click the panel icon to
-read it. Everything else — macros, steps, conditions, which macro the switch
-runs — lives in the preferences window.
+The panel popup holds only a run switch, a **Stop**, the name of whatever is
+running, and a **Settings** button. It is also where progress shows up: the
+current step, the last condition verdict, "Recorded 3 steps". That text is kept
+after the fact, because most of it happens while the menu is closed — click the
+panel icon to read it. Everything else — macros, steps, conditions, which macro
+the switch runs — lives in the preferences window.
 
-While a macro is running, opening the menu and putting the pointer on it pauses
-the run between steps — otherwise a macro clicking at fixed coordinates could
-click its own menu. It resumes as soon as you move off the menu or close it.
+### Pause, continue, stop
+
+`Ctrl+Shift+F6` — and the switch in the popup — starts the selected macro, and
+halts a running one. Halting this way writes down the step it was on, so the
+switch reads **Continue** and the next press picks up there rather than at the
+top. **Stop** in the popup, and the emergency shortcut, throw that place away:
+after either of them the macro starts from the beginning again.
+
+You can also choose the step yourself. Every step in the editor has a
+*jump* button that marks it as where the next run starts; the marked step is
+tinted, and only one step can hold the mark at a time. A run that fails marks
+the step that failed, so you can fix it and press the shortcut again instead of
+replaying everything before it.
+
+The mark is taken at face value: continuing into the `then` or `else` of a
+condition runs that branch without asking the condition again, since asking
+could send the run down the other one and skip the very step you picked. A loop
+you continue into is only shortened for that one pass — the next time round it
+runs its whole body.
+
+Separately from all this, while a macro is running, opening the menu and putting
+the pointer on it holds the run between steps — otherwise a macro clicking at
+fixed coordinates could click its own menu. It carries on as soon as you move
+off the menu or close it.
 
 Build a macro by recording it (`Ctrl+Shift+R`), then open Settings to adjust it.
 Recorded steps are appended to the end of the selected macro — if that macro is
