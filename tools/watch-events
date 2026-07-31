@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Watch what the clickmate daemon is capturing.
+
+Turns recording on, decodes the event stream to readable lines, and turns
+recording off again on exit. Useful on its own — if a device does not show up
+here, nothing above the daemon will ever see it either.
+
+    tools/watch-events            # until Ctrl-C
+    tools/watch-events 15         # for 15 seconds
+    tools/watch-events 15 --raw   # unparsed JSON lines
+"""
+
+import json
+import os
+import socket
+import sys
+import time
+
+CONTROL = os.environ.get("CLICKMATE_SOCKET", "/var/run/click-socket")
+EVENTS = os.environ.get("CLICKMATE_EVENT_SOCKET", "/var/run/clickmate-events")
+
+EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC = 0, 1, 2, 3, 4
+EV_NAMES = {EV_SYN: "SYN", EV_KEY: "KEY", EV_REL: "REL", EV_ABS: "ABS", EV_MSC: "MSC"}
+REL_NAMES = {0: "X", 1: "Y", 6: "HWHEEL", 8: "WHEEL", 11: "WHEEL_HI_RES", 12: "HWHEEL_HI_RES"}
+BTN_NAMES = {272: "BTN_LEFT", 273: "BTN_RIGHT", 274: "BTN_MIDDLE", 275: "BTN_SIDE", 276: "BTN_EXTRA"}
+KEY_VALUES = {0: "up", 1: "down", 2: "repeat"}
+
+# Enough of the evdev table to read the output at a glance.
+KEY_NAMES = dict(zip(range(1, 84), (
+    "ESC 1 2 3 4 5 6 7 8 9 0 MINUS EQUAL BACKSPACE TAB Q W E R T Y U I O P "
+    "LEFTBRACE RIGHTBRACE ENTER LEFTCTRL A S D F G H J K L SEMICOLON APOSTROPHE "
+    "GRAVE LEFTSHIFT BACKSLASH Z X C V B N M COMMA DOT SLASH RIGHTSHIFT KPASTERISK "
+    "LEFTALT SPACE CAPSLOCK F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 NUMLOCK SCROLLLOCK "
+    "KP7 KP8 KP9 KPMINUS KP4 KP5 KP6 KPPLUS KP1 KP2 KP3 KP0 KPDOT"
+).split()))
+KEY_NAMES.update({87: "F11", 88: "F12", 96: "KPENTER", 97: "RIGHTCTRL", 100: "RIGHTALT",
+                  102: "HOME", 103: "UP", 104: "PAGEUP", 105: "LEFT", 106: "RIGHT",
+                  107: "END", 108: "DOWN", 109: "PAGEDOWN", 110: "INSERT", 111: "DELETE",
+                  125: "LEFTMETA", 126: "RIGHTMETA"})
+
+
+def request(method, path, body=None):
+    """Minimal HTTP over the daemon's unix socket."""
+    # No body on GET: a GET carrying Content-Length confuses the daemon's
+    # request handling, which expects to answer before reading anything.
+    payload = json.dumps(body).encode() if body is not None else b""
+    length = f"Content-Type: application/json\r\nContent-Length: {len(payload)}\r\n" if payload else ""
+    head = (
+        f"{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+        f"{length}\r\n"
+    ).encode()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.connect(CONTROL)
+        sock.sendall(head + payload)
+        data = b""
+        while chunk := sock.recv(4096):
+            data += chunk
+    _, _, body_text = data.partition(b"\r\n\r\n")
+    return json.loads(body_text or b"{}")
+
+
+def describe(event, devices):
+    kind = EV_NAMES.get(event["type"], str(event["type"]))
+    code, value = event["code"], event["value"]
+
+    if event["type"] == EV_KEY:
+        name = BTN_NAMES.get(code) or KEY_NAMES.get(code) or f"code {code}"
+        detail = f"{name} {KEY_VALUES.get(value, value)}"
+    elif event["type"] == EV_REL:
+        detail = f"{REL_NAMES.get(code, code)} {value:+d}"
+    else:
+        detail = f"code {code} = {value}"
+
+    device = devices.get(event["dev"], f"device {event['dev']}")
+    return f"{device:<44} {kind:<4} {detail}"
+
+
+def main():
+    seconds = None
+    raw = "--raw" in sys.argv
+    for arg in sys.argv[1:]:
+        if not arg.startswith("-"):
+            seconds = float(arg)
+
+    try:
+        status = request("GET", "/status")
+    except OSError as error:
+        sys.exit(f"cannot reach the daemon at {CONTROL}: {error}\n"
+                 f"is it running?  systemctl status clickmate")
+
+    devices = {d["index"]: os.path.basename(d["path"]) or d["name"] for d in status["devices"]}
+    print(f"daemon API v{status['version']}, capturing:")
+    for index, device in sorted(devices.items()):
+        caps = status["devices"][index]
+        kinds = ", ".join(k for k in ("keys", "pointer") if caps["keyboard" if k == "keys" else "pointer"])
+        print(f"  [{index}] {device}  ({kinds or 'no input classes'})")
+    print("\nmove the mouse and type; anything not listed above cannot appear here")
+    print("-" * 72)
+
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stream.connect(EVENTS)
+    stream.settimeout(0.5)
+    request("POST", "/record", {"on": True})
+
+    seen = {}
+    deadline = time.monotonic() + seconds if seconds else None
+    buffer = b""
+    try:
+        while deadline is None or time.monotonic() < deadline:
+            try:
+                chunk = stream.recv(65536)
+                if not chunk:
+                    break
+                buffer += chunk
+            except socket.timeout:
+                continue
+            *lines, buffer = buffer.split(b"\n")
+            for line in lines:
+                if not line.strip():
+                    continue
+                if raw:
+                    print(line.decode())
+                    continue
+                event = json.loads(line)
+                if event["type"] in (EV_SYN, EV_MSC):
+                    continue   # SYN and MSC_SCAN accompany every event; pure noise
+                seen[event["dev"]] = seen.get(event["dev"], 0) + 1
+                print(describe(event, devices))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        request("POST", "/record", {"on": False})
+        stream.close()
+
+    print("-" * 72)
+    if not seen:
+        print("no events at all — nothing was touched, or no captured device was used")
+    for index, device in sorted(devices.items()):
+        print(f"  [{index}] {device}: {seen.get(index, 0)} events")
+    silent = [d for i, d in sorted(devices.items()) if not seen.get(i)]
+    if silent and seen:
+        print("\nsilent devices are fine if you did not use them — but if the device you\n"
+              "were using is missing from the list entirely, add it with -n in clickmate.service")
+
+
+if __name__ == "__main__":
+    main()

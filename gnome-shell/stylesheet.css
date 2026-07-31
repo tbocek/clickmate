@@ -1,6 +1,58 @@
-.error-label {
-    color: red;
+/* Clickmate: panel popup, run HUD and region picker. */
+
+.clickmate-status-box {
+    spacing: 2px;
 }
 
-.status-label {
+.clickmate-status {
+    font-weight: bold;
+}
+
+.clickmate-detail {
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.65);
+}
+
+.clickmate-recording {
+    color: #e01b24;
+}
+
+/* Position marker */
+
+.clickmate-marker-bar {
+    background-color: #e01b24;
+    border-radius: 2px;
+}
+
+.clickmate-marker-region {
+    border: 3px solid #e01b24;
+    background-color: rgba(224, 27, 36, 0.12);
+}
+
+.clickmate-marker-label {
+    padding: 3px 8px;
+    border-radius: 6px;
+    background-color: rgba(0, 0, 0, 0.85);
+    color: white;
+    font-size: 0.85em;
+}
+
+/* Region picker */
+
+.clickmate-picker {
+    background-color: rgba(0, 0, 0, 0.25);
+}
+
+.clickmate-picker-band {
+    background-color: rgba(53, 132, 228, 0.25);
+    border: 2px solid #3584e4;
+}
+
+.clickmate-picker-hint {
+    width: 520px;
+    text-align: center;
+    padding: 12px;
+    border-radius: 12px;
+    background-color: rgba(0, 0, 0, 0.8);
+    color: white;
 }

@@ -1,12 +1,22 @@
 [Unit]
-Description=Clickmate Autoclicker
+Description=Clickmate input service (macro recording and playback)
 Wants=graphical.target
-ConditionPathExists=/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse
 
 [Install]
 WantedBy=graphical.target
 
 [Service]
-ExecStart=/usr/local/bin/clickmate -d /dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse
+# Devices are named rather than pathed. Anything paired through a wireless
+# receiver gets no stable entry under /dev/input/by-id, and bare event numbers
+# move around between boots. List your own with:
+#   grep '^N: Name' /proc/bus/input/devices
+# A name that matches nothing is only a warning, so an unplugged device does not
+# stop the rest from being captured.
+ExecStart=/usr/local/bin/clickmate \
+  -n "Logitech Wireless Device PID:4055" \
+  -n "Logitech K400 Plus" \
+  -n "Logitech HID compliant keyboard"
+Restart=on-failure
+RestartSec=2
 StandardOutput=null
 StandardError=journal
