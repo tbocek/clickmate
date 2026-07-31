@@ -21,8 +21,6 @@ export function starterMacro(): Macro {
                             type: 'llm',
                             prompt: 'Is the button on the left green?',
                             region: null,
-                            expect: true,
-                            onError: 'false',
                         },
                         then: [
                             {
