@@ -8,6 +8,9 @@ import { textToEvents, keyCode, keyName, charToKey, buttonFromCode } from '../di
 import { starterMacro } from '../dist/src/starter.js';
 import { parseVerdict } from '../dist/src/llm.js';
 import { isLoopbackEndpoint } from '../dist/src/store.js';
+import {
+    reportProblem, listProblems, problemCount, clearProblems, onProblemsChanged,
+} from '../dist/src/problems.js';
 
 let failures = 0;
 const check = (name, cond, extra = '') => {
@@ -255,6 +258,36 @@ check('verdict unknown keys only', parseVerdict('{"colour":"green"}') === null,
 check('loopback localhost', isLoopbackEndpoint('http://localhost:11434/v1/chat/completions'));
 check('loopback 127', isLoopbackEndpoint('http://127.0.0.1:8080/v1/chat/completions'));
 check('not loopback', !isLoopbackEndpoint('http://192.168.1.5:11434/v1/chat/completions'));
+
+// problem log
+clearProblems();
+let notified = 0;
+const stopListening = onProblemsChanged(() => notified++);
+reportProblem('Model', 'connection refused', { hint: 'start it', where: 'if LLM' });
+check('problem recorded', problemCount() === 1);
+check('problem listener fired', notified === 1);
+check('problem fields kept', listProblems()[0].hint === 'start it' && listProblems()[0].where === 'if LLM');
+check('problem is timestamped', /^\d\d:\d\d:\d\d$/.test(listProblems()[0].time), listProblems()[0].time);
+reportProblem('Model', 'connection refused');
+check('repeat collapses', problemCount() === 1 && listProblems()[0].count === 2);
+check('repeat keeps the hint', listProblems()[0].hint === 'start it');
+reportProblem('Daemon', 'not running');
+check('different source is its own entry', problemCount() === 2);
+check('newest first', listProblems()[0].source === 'Daemon');
+reportProblem('Model', 'connection refused');
+check('a repeat comes back to the top', listProblems()[0].source === 'Model');
+for (let i = 0; i < 40; i++) reportProblem('Step', `failure ${i}`);
+check('log is capped', problemCount() === 25, String(problemCount()));
+check('the cap keeps the newest', listProblems()[0].message === 'failure 39');
+reportProblem('Screen', '   ');
+check('blank message still says something', listProblems()[0].message === 'unknown error');
+clearProblems();
+check('cleared', problemCount() === 0);
+stopListening();
+const before = notified;
+reportProblem('Macro', 'after unsubscribe');
+check('unsubscribed listener is silent', notified === before);
+clearProblems();
 
 print(failures === 0 ? '\nALL PASSED' : `\n${failures} FAILURES`);
 if (failures > 0) imports.system.exit(1);

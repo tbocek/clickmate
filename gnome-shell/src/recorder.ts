@@ -18,6 +18,7 @@ import {
     keyName,
 } from './keymap.js';
 import { newId, type ClickStep, type KeyStep, type MoveStep, type Step, type WaitStep } from './model.js';
+import { reportProblem } from './problems.js';
 import type { Config } from './store.js';
 
 /** How long the pointer must sit still before a movement counts as finished. */
@@ -29,6 +30,8 @@ const ENDPOINT_EPSILON = 3;
 export interface RecorderCallbacks {
     onStatus?: (text: string) => void;
     onError?: (error: Error) => void;
+    /** Fired whenever the recorder starts or stops watching input, either kind. */
+    onBusyChanged?: (busy: boolean) => void;
 }
 
 interface PendingKey {
@@ -96,6 +99,8 @@ export class Recorder {
         this._reset();
         this._mode = mode;
 
+        this._callbacks.onBusyChanged?.(true);
+
         try {
             this._stream = new EventStream(this._daemon.eventPath);
             await this._stream.open(
@@ -113,17 +118,25 @@ export class Recorder {
             this._mode = 'idle';
             this._stream?.close();
             this._stream = null;
+            this._callbacks.onBusyChanged?.(false);
             throw error;
         }
     }
 
     private _endSession(): void {
+        const wasBusy = this._mode !== 'idle';
         this._mode = 'idle';
+        if (wasBusy) {
+            this._callbacks.onBusyChanged?.(false);
+        }
         this._clearTimers();
         this._stream?.close();
         this._stream = null;
         void this._daemon.setRecording(false).catch(error => {
-            log(`clickmate: could not stop daemon recording: ${(error as Error).message}`);
+            reportProblem('Recording', `could not take the daemon out of recording mode: ${(error as Error).message}`, {
+                hint: 'It may still be mirroring your input to the event stream. ' +
+                    'Restart it with: sudo systemctl restart clickmate',
+            });
         });
     }
 
@@ -336,7 +349,7 @@ export class Recorder {
             return;
         }
         this._motionPending = false;
-        if (!emit || !this._config.recordMotion) {
+        if (!emit) {
             return;
         }
 

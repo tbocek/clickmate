@@ -70,14 +70,21 @@ install() {
     die "metadata.json not found. Are you in the extension directory?" 2
   fi
 
-  # Remove existing symlink or directory if it exists
-  if [ -e "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID" ]; then
+  # Remove existing symlink or directory if it exists. -L as well as -e: a link
+  # left over from before dist/ was built is dangling, so -e alone says "no such
+  # thing" and the ln below then fails with "File exists".
+  if [ -e "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID" ] || [ -L "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID" ]; then
     msg "Removing existing extension link/directory..."
     rm -rf "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID"
   fi
 
   # Create extensions directory if it doesn't exist
   mkdir -p "$LOCAL_EXTENSIONS_DIR"
+
+  # dist/ is a build product, and this runs from pnpm's install hook — before
+  # anything has ever been compiled. Link to an empty dir rather than a dangling
+  # link, which GNOME reports as "extension does not exist".
+  mkdir -p "$EXTENSION_DIR"
 
   msg "Creating symlink to development directory..."
   ln -s "$EXTENSION_DIR" "$LOCAL_EXTENSIONS_DIR/$EXTENSION_UUID"

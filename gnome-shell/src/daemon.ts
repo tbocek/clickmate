@@ -6,6 +6,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import type { RawEvent } from './model.js';
+import { reportProblem } from './problems.js';
 
 export const DEFAULT_CONTROL_SOCKET = '/var/run/click-socket';
 export const DEFAULT_EVENT_SOCKET = '/var/run/clickmate-events';
@@ -285,8 +286,12 @@ export class EventStream {
                 }
                 try {
                     onEvent(JSON.parse(text) as StreamedEvent);
-                } catch (error) {
-                    log(`clickmate: bad event stream line ${JSON.stringify(text)}`);
+                } catch {
+                    // Collapses by message, so a stream that has gone out of sync
+                    // reports once with a count rather than once per event.
+                    reportProblem('Daemon', 'the event stream sent something unreadable', {
+                        hint: `Recording will be missing events. First bad line: ${text.slice(0, 80)}`,
+                    });
                 }
             }
             onClosed?.(null);

@@ -16,6 +16,16 @@
             <description>Id of the macro the popup and shortcuts act on</description>
         </key>
 
+        <!-- Published by the shell while a macro runs: the chain of step ids the
+             runner is currently inside, outermost first. Preferences highlights
+             them. Carries a serial because two identical writes — the empty path
+             at the end of one run and of the next — would not be signalled. -->
+        <key name="running-steps" type="s">
+            <default>''</default>
+            <summary>Running steps</summary>
+            <description>Internal: JSON list of the step ids the runner is currently inside</description>
+        </key>
+
         <!-- Preferences cannot see or draw on the screen from its own process,
              so each of these is a serialled JSON request to the shell, answered
              on the matching -result key. -->
@@ -107,17 +117,10 @@
         </key>
 
         <key name="llm-max-width" type="i">
-            <default>1024</default>
+            <default>1280</default>
             <range min="128" max="4096"/>
             <summary>Maximum image width</summary>
-            <description>Screenshots are scaled down to this width before being sent</description>
-        </key>
-
-        <key name="llm-jpeg-quality" type="i">
-            <default>80</default>
-            <range min="30" max="100"/>
-            <summary>JPEG quality</summary>
-            <description>Quality of the screenshot encoding sent to the model</description>
+            <description>Screenshots are scaled down to this width before being sent. Preferences offers the widths of the common resolutions — 1280 is 720p.</description>
         </key>
 
         <!-- Daemon -->
@@ -139,12 +142,6 @@
             <range min="0" max="60000"/>
             <summary>Pause threshold</summary>
             <description>Idle gaps longer than this become wait steps; 0 records no pauses</description>
-        </key>
-
-        <key name="record-motion" type="b">
-            <default>true</default>
-            <summary>Record pointer motion</summary>
-            <description>Add a move step wherever the pointer comes to rest; clicks already carry their own position</description>
         </key>
 
     </schema>

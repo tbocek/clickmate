@@ -11,11 +11,22 @@ WantedBy=graphical.target
 # move around between boots. List your own with:
 #   grep '^N: Name' /proc/bus/input/devices
 # A name that matches nothing is only a warning, so an unplugged device does not
-# stop the rest from being captured.
+# stop the rest from being captured — and it is picked up on its own once it
+# appears, which is why this unit needs no ordering against whatever creates the
+# devices it names.
+#
+# The keyboard named here is dvorak's output, not the physical keyboard: dvorak
+# already holds an exclusive grab on the Keychron, so capturing that directly
+# would leave clickmate observe-only and reading pre-remap key codes. Chaining
+# behind it — keyboard -> dvorak -> clickmate -> desktop — is what makes a
+# recorded keystroke match the letter you actually pressed.
+#
+# Dvorak must be told to leave clickmate's clones alone, or it remaps them a
+# second time and every keystroke arrives as the wrong letter:
+#   ExecStart=/usr/local/bin/dvorak -d /dev/input/%i -i "clickmate virtual"
 ExecStart=/usr/local/bin/clickmate \
-  -n "Logitech Wireless Device PID:4055" \
-  -n "Logitech K400 Plus" \
-  -n "Logitech HID compliant keyboard"
+  -n "Virtual Dvorak Keyboard" \
+  -n "Logitech Signature M650 L"
 Restart=on-failure
 RestartSec=2
 StandardOutput=null

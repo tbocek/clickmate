@@ -6,6 +6,7 @@ import GLib from 'gi://GLib';
 import type { ColorCondition, Condition, LlmCondition } from './model.js';
 import { describeCondition } from './model.js';
 import { LlmClient, LlmError, type LlmSettings } from './llm.js';
+import { reportProblem } from './problems.js';
 import type { Config } from './store.js';
 import {
     captureRegion,
@@ -149,7 +150,7 @@ export class ConditionEvaluator {
             const pixbuf = condition.region
                 ? await captureRegion(condition.region.x, condition.region.y, condition.region.w, condition.region.h)
                 : await captureScreen();
-            const image = encodeForLlm(pixbuf, this._config.llmMaxWidth, this._config.llmJpegQuality);
+            const image = encodeForLlm(pixbuf, this._config.llmMaxWidth);
             const verdict = await this._llm.ask(condition.prompt, image, settings);
 
             const expect = condition.expect !== false;
@@ -162,7 +163,15 @@ export class ConditionEvaluator {
             if (policy === 'abort') {
                 throw new Error(`LLM check failed: ${message}`);
             }
-            log(`clickmate: LLM check failed (${message}); treating as ${policy}`);
+            // Counting the check as `policy` is what the step asked for, but on
+            // its own it is invisible: an unconfigured model just makes the macro
+            // take the empty branch for ever and look like it does nothing.
+            reportProblem('Model', message, {
+                where: describeCondition(condition),
+                hint: `The check counted as “${policy === 'true' ? 'yes' : 'no'}”. ` +
+                    `Clickmate asked ${settings.endpoint || '(no endpoint set)'} — start that server, ` +
+                    'point Settings → Model somewhere else, or replace the check with a pixel colour test.',
+            });
             return { result: policy === 'true', detail: `error: ${message}` };
         }
     }

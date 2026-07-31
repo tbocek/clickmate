@@ -2,6 +2,7 @@
 // widgets and cannot block the compositor.
 
 import Adw from 'gi://Adw';
+import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
@@ -18,6 +19,7 @@ import {
     type Macro,
     type Region,
     type Step,
+    type StepKind,
     childLists,
     cloneStep,
     describeCondition,
@@ -33,9 +35,126 @@ import {
     removeStep,
     stringifyDocument,
 } from './src/model.js';
-import { MacroStore, isLoopbackEndpoint } from './src/store.js';
+import { MacroStore } from './src/store.js';
+import { testConnection } from './src/llm.js';
 
 const CONDITION_TYPES: ConditionType[] = ['always', 'llm', 'color', 'and', 'or', 'not'];
+
+const MACROS_FILE = 'clickmate-macros.json';
+const SETTINGS_FILE = 'clickmate-settings.json';
+
+/**
+ * Keys the settings file leaves alone. The macros live in their own export, and
+ * the rest is live state — what is running, and the request/answer keys
+ * preferences uses to talk to the shell. Importing any of those would either
+ * clobber the other export or replay a stale request.
+ */
+const NOT_SETTINGS = ['macros', 'active-macro-id', 'running-steps'];
+
+function isTransferableKey(key: string): boolean {
+    return !NOT_SETTINGS.includes(key) && !key.endsWith('-request') && !key.endsWith('-result');
+}
+
+function homeFile(name: string): string {
+    return GLib.build_filenamev([GLib.get_home_dir(), name]);
+}
+
+/**
+ * Screenshots are scaled by width, so on the 16:9 screen these names come from
+ * the width is the resolution: 1280 across is what "720p" means. Stored as the
+ * width itself, which is what the setting has always held.
+ */
+const SCALE_WIDTHS = ['854', '1280', '1920', '2560', '3840'] as const;
+const SCALE_LABELS: Record<string, string> = {
+    '854': _('480p — 854 px wide'),
+    '1280': _('720p — 1280 px wide'),
+    '1920': _('1080p — 1920 px wide'),
+    '2560': _('1440p — 2560 px wide'),
+    '3840': _('4K — 3840 px wide'),
+};
+
+/**
+ * The nearest listed width that is not *smaller* than the stored one. Settings
+ * written before this was a list hold arbitrary numbers, and rounding up keeps
+ * answers at least as accurate as they were.
+ */
+function scaleWidthFor(width: number): typeof SCALE_WIDTHS[number] {
+    return SCALE_WIDTHS.find(option => Number(option) >= width) ?? SCALE_WIDTHS[SCALE_WIDTHS.length - 1];
+}
+
+/** The nested step lists a container step owns, as the editor draws them. */
+type BranchKind = 'body' | 'then' | 'else';
+
+/**
+ * A step reads as a line of a program, so it gets the same icon everywhere and
+ * the icon carries the kind — leaving the title free for the actual parameters.
+ */
+const STEP_ICONS: Record<StepKind, string> = {
+    click: 'input-mouse-symbolic',
+    move: 'find-location-symbolic',
+    scroll: 'view-sort-descending-symbolic',
+    key: 'input-keyboard-symbolic',
+    text: 'insert-text-symbolic',
+    wait: 'alarm-symbolic',
+    loop: 'media-playlist-repeat-symbolic',
+    if: 'media-playlist-shuffle-symbolic',
+    break: 'media-playback-stop-symbolic',
+    continue: 'media-skip-forward-symbolic',
+    stop: 'process-stop-symbolic',
+};
+
+const BRANCH_STYLE: Record<BranchKind, { icon: string; title: string; hint: string }> = {
+    body: {
+        icon: 'media-playlist-repeat-symbolic',
+        title: 'Body',
+        hint: 'runs on every iteration',
+    },
+    then: {
+        icon: 'object-select-symbolic',
+        title: 'Then',
+        hint: 'runs when the condition holds',
+    },
+    else: {
+        icon: 'window-close-symbolic',
+        title: 'Else',
+        hint: 'runs when it does not',
+    },
+};
+
+/**
+ * Nesting is the thing you have to be able to read at a glance, and stacked
+ * expander rows on their own do not show it. Every body gets a coloured rail
+ * down its left edge — one colour per branch — that spans everything inside it,
+ * and the steps within are indented under that one rail. Exactly one rail per
+ * level of nesting: giving the steps their own rail as well only drew the same
+ * boundary twice, a hand's width apart. The running step and the loops it sits
+ * in are lit up on top of that.
+ */
+const EDITOR_CSS = `
+.clickmate-branch {
+    border-left: 4px solid alpha(@accent_bg_color, 0.85);
+    background-color: alpha(@accent_bg_color, 0.06);
+}
+.clickmate-branch-then {
+    border-left-color: alpha(@success_color, 0.9);
+    background-color: alpha(@success_color, 0.06);
+}
+.clickmate-branch-else {
+    border-left-color: alpha(@warning_color, 0.9);
+    background-color: alpha(@warning_color, 0.06);
+}
+
+.clickmate-running {
+    background-color: alpha(@accent_bg_color, 0.28);
+    border-left: 4px solid @accent_bg_color;
+}
+.clickmate-running-block { border-left: 4px solid @accent_bg_color; }
+.clickmate-running-icon { color: @accent_bg_color; }
+.clickmate-running-parent-icon { color: alpha(@accent_bg_color, 0.7); }
+`;
+
+/** How far a step inside a body sits in from the rail of that body. */
+const INDENT_PX = 12;
 
 function debounce(fn: () => void, ms = 400): () => void {
     let sourceId = 0;
@@ -121,6 +240,17 @@ function iconButton(iconName: string, tooltip: string, onClick: () => void): Gtk
     return button;
 }
 
+/** What highlighting a running step needs to get at, per step id. */
+interface StepRow {
+    row: Adw.ExpanderRow;
+    icon: Gtk.Image;
+    kindIcon: string;
+    /** Loops and ifs get a rail rather than a fill: a fill would flood the body. */
+    container: boolean;
+    /** The Body/Then/Else headers that follow this row, lit up along with it. */
+    branchRows: Adw.ExpanderRow[];
+}
+
 export default class ClickmatePreferences extends ExtensionPreferences {
     private _settings!: Gio.Settings;
     private _store!: MacroStore;
@@ -131,6 +261,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     // Structural edits rebuild the whole page, which would otherwise collapse
     // every expander. Expansion is keyed by step id so it survives a rebuild.
     private _expanded = new Set<string>();
+    private _collapsed = new Set<string>();
     private _rebuilding = false;
     private _rebuildScheduled = false;
     // Seeded from the clock, not 0: a reopened preferences window would otherwise
@@ -138,6 +269,16 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     // GSettings does not signal.
     private _requestSerial = GLib.get_real_time();
     private _closed = false;
+
+    // Rows the shell's running position is painted onto. Rebuilt with the page,
+    // so highlighting can toggle style classes instead of rebuilding anything.
+    private _stepRows = new Map<string, StepRow>();
+    private _highlighted: string[] = [];
+    private _runningChangedId = 0;
+
+    // Every page but Macros. Their rows read the settings once, when built, so
+    // importing settings has to build them again to show what arrived.
+    private _settingsPages: Adw.PreferencesPage[] = [];
 
     /**
      * One text field for a group of related numbers — a point, an offset, a
@@ -184,34 +325,65 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
 
-    private _expander(key: string, props: Partial<Adw.ExpanderRow.ConstructorProps>): Adw.ExpanderRow {
-        const row = new Adw.ExpanderRow({ ...props, expanded: this._expanded.has(key) });
+    /**
+     * `defaultExpanded` opens a row the first time it is seen — bodies use it, so
+     * opening a loop shows what is inside it rather than another closed row.
+     * Collapsing is remembered separately, or the default would undo it on the
+     * next rebuild.
+     */
+    private _expander(
+        key: string,
+        props: Partial<Adw.ExpanderRow.ConstructorProps>,
+        defaultExpanded = false,
+    ): Adw.ExpanderRow {
+        const expanded = this._collapsed.has(key)
+            ? false
+            : defaultExpanded || this._expanded.has(key);
+        const row = new Adw.ExpanderRow({ ...props, expanded });
         row.connect('notify::expanded', () => {
             if (this._rebuilding) {
                 return; // teardown, not a user action
             }
             if (row.get_expanded()) {
                 this._expanded.add(key);
+                this._collapsed.delete(key);
             } else {
                 this._expanded.delete(key);
+                this._collapsed.add(key);
             }
         });
         return row;
+    }
+
+    /** Load the editor's own style classes once, on top of whatever theme is set. */
+    private _installCss(): void {
+        const display = Gdk.Display.get_default();
+        if (!display) {
+            return;
+        }
+        try {
+            const provider = new Gtk.CssProvider();
+            provider.load_from_string(EDITOR_CSS);
+            Gtk.StyleContext.add_provider_for_display(
+                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
+        } catch (error) {
+            // Cosmetic only: an unparsable rule must not cost you the editor.
+            log(`clickmate: could not load editor styles: ${(error as Error).message}`);
+        }
     }
 
     async fillPreferencesWindow(window: Adw.PreferencesWindow): Promise<void> {
         this._window = window;
         this._settings = this.getSettings();
         this._store = new MacroStore(this._settings);
+        this._installCss();
 
         this._macrosPage = new Adw.PreferencesPage({
             title: _('Macros'),
             iconName: 'view-list-symbolic',
         });
         window.add(this._macrosPage);
-        window.add(this._buildLlmPage());
-        window.add(this._buildInputPage());
-        window.add(this._buildShortcutsPage());
+        this._addSettingsPages();
 
         this._rebuildMacros();
 
@@ -223,9 +395,18 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             }
         });
 
+        // Where the shell's runner currently is. Only style classes change, so
+        // this can arrive several times a second without disturbing an edit.
+        this._runningChangedId = this._settings.connect(
+            'changed::running-steps', () => this._applyRunningHighlight());
+
         window.connect('close-request', () => {
             this._closed = true;
             unsubscribe();
+            if (this._runningChangedId) {
+                this._settings.disconnect(this._runningChangedId);
+                this._runningChangedId = 0;
+            }
             this._store.destroy();
             return false;
         });
@@ -264,6 +445,9 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         }
         this._macroGroups = [];
         this._rebuilding = false;
+        // Every row just went away, so nothing is highlighted any more either.
+        this._stepRows.clear();
+        this._highlighted = [];
 
         const actions = new Adw.PreferencesGroup({
             title: _('Macros'),
@@ -305,17 +489,20 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             actions.add(selector);
         }
 
-        const importExport = new Adw.ActionRow({
-            title: _('Import / export'),
-            subtitle: _('Move macros between machines as JSON'),
-        });
-        const exportButton = new Gtk.Button({ label: _('Export'), valign: Gtk.Align.CENTER });
-        exportButton.connect('clicked', () => this._exportDocument());
-        const importButton = new Gtk.Button({ label: _('Import'), valign: Gtk.Align.CENTER });
-        importButton.connect('clicked', () => this._importDocument());
-        importExport.add_suffix(exportButton);
-        importExport.add_suffix(importButton);
-        actions.add(importExport);
+        // Two files, because they move for different reasons: the steps are the
+        // work, the settings are the machine they run on.
+        actions.add(this._transferRow(
+            _('Macros'),
+            `${_('The recorded steps')} — ~/${MACROS_FILE}`,
+            () => this._exportDocument(),
+            () => this._importDocument(),
+        ));
+        actions.add(this._transferRow(
+            _('Settings'),
+            `${_('Endpoint, model, sockets and shortcuts')} — ~/${SETTINGS_FILE}`,
+            () => this._exportSettings(),
+            () => this._importSettings(),
+        ));
 
         this._macrosPage.add(actions);
         this._macroGroups.push(actions);
@@ -335,6 +522,79 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             const group = this._buildMacroGroup(macro);
             this._macrosPage.add(group);
             this._macroGroups.push(group);
+        }
+
+        // A rebuild in the middle of a run — after a recording, say — must not
+        // lose the marker on the step the runner is on.
+        this._applyRunningHighlight();
+    }
+
+    // --- running position --------------------------------------------------
+
+    /**
+     * The shell publishes the chain of steps its runner is inside. Light up the
+     * last one, and mark the loops and ifs above it: those stay visible even when
+     * the step itself is inside a collapsed body.
+     */
+    private _applyRunningHighlight(): void {
+        for (const id of this._highlighted) {
+            const entry = this._stepRows.get(id);
+            if (entry) {
+                this._setRunState(entry, 'idle');
+            }
+        }
+        this._highlighted = [];
+
+        const ids = this._runningStepIds();
+        ids.forEach((id, index) => {
+            const entry = this._stepRows.get(id);
+            if (!entry) {
+                return; // a step from another macro, or one just deleted
+            }
+            this._setRunState(entry, index === ids.length - 1 ? 'active' : 'ancestor');
+            this._highlighted.push(id);
+        });
+    }
+
+    private _runningStepIds(): string[] {
+        try {
+            const raw = this._settings.get_string('running-steps');
+            if (!raw) {
+                return [];
+            }
+            const parsed = JSON.parse(raw) as { steps?: unknown };
+            return Array.isArray(parsed.steps) ? parsed.steps.filter(id => typeof id === 'string') : [];
+        } catch {
+            return [];
+        }
+    }
+
+    private _setRunState(entry: StepRow, state: 'idle' | 'active' | 'ancestor'): void {
+        for (const cls of ['clickmate-running', 'clickmate-running-block']) {
+            entry.row.remove_css_class(cls);
+        }
+        for (const cls of ['clickmate-running-icon', 'clickmate-running-parent-icon']) {
+            entry.icon.remove_css_class(cls);
+        }
+        entry.icon.icon_name = entry.kindIcon;
+        for (const branch of entry.branchRows) {
+            branch.remove_css_class('clickmate-running-block');
+        }
+
+        if (state === 'active') {
+            entry.icon.icon_name = 'media-playback-start-symbolic';
+            entry.icon.add_css_class('clickmate-running-icon');
+            entry.row.add_css_class(entry.container ? 'clickmate-running-block' : 'clickmate-running');
+        } else if (state === 'ancestor') {
+            entry.icon.add_css_class('clickmate-running-parent-icon');
+            entry.row.add_css_class('clickmate-running-block');
+        }
+        if (state !== 'idle') {
+            // The body headers sit beside the step now, not inside it, so they
+            // need the same rail or the chain of rails breaks at every loop.
+            for (const branch of entry.branchRows) {
+                branch.add_css_class('clickmate-running-block');
+            }
         }
     }
 
@@ -382,17 +642,80 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         group.add(addRow);
 
         for (const step of macro.body) {
-            group.add(this._buildStepRow(macro, step));
+            for (const widget of this._buildStepWidgets(macro, step)) {
+                group.add(widget);
+            }
         }
 
         return group;
     }
 
-    private _buildStepRow(macro: Macro, step: Step): Adw.ExpanderRow {
+    /** "3 steps", "empty" — the same phrasing wherever a body is counted. */
+    private _countLabel(count: number): string {
+        if (count === 0) {
+            return _('empty');
+        }
+        return `${count} ${count === 1 ? _('step') : _('steps')}`;
+    }
+
+    /**
+     * What a step says when it is closed: your own note first, then what it
+     * contains, so a collapsed loop still tells you it holds four steps.
+     */
+    private _stepSubtitle(step: Step): string {
+        const parts: string[] = [];
+        if (step.note) {
+            parts.push(step.note);
+        }
+        if (step.kind === 'loop') {
+            parts.push(`${this._countLabel(step.body.length)} ${_('in the body')}`);
+        } else if (step.kind === 'if') {
+            parts.push(`${this._countLabel(step.then.length)} ${_('then')}, ` +
+                `${this._countLabel((step.else ?? []).length)} ${_('else')}`);
+        }
+        if (step.enabled === false) {
+            parts.push(_('disabled'));
+        }
+        return parts.join(' — ');
+    }
+
+    /**
+     * One step, followed by its Body/Then/Else blocks as sibling rows rather
+     * than rows inside it — folding a loop shut to get at its settings must not
+     * take its body off the screen with it.
+     *
+     * `indent` is how far in this row sits within whatever contains it. The rail
+     * belongs to the enclosing body, not to the step, so a step draws none of
+     * its own — the indent alone puts it under the right one.
+     */
+    private _buildStepWidgets(
+        macro: Macro,
+        step: Step,
+        indent = 0,
+    ): Gtk.Widget[] {
         const stepKey = `step:${step.id}`;
+        const children = childLists(step);
         const row = this._expander(stepKey, {
             title: describeStep(step),
-            subtitle: step.note ?? '',
+            subtitle: this._stepSubtitle(step),
+        });
+        const widgets: Gtk.Widget[] = [row];
+        const branchRows: Adw.ExpanderRow[] = [];
+
+        row.set_margin_start(indent);
+        if (step.enabled === false) {
+            row.add_css_class('dim-label');
+        }
+
+        const kindIcon = STEP_ICONS[step.kind];
+        const icon = new Gtk.Image({ icon_name: kindIcon, valign: Gtk.Align.CENTER });
+        row.add_prefix(icon);
+        this._stepRows.set(step.id, {
+            row,
+            icon,
+            kindIcon,
+            container: children.length > 0,
+            branchRows,
         });
 
         const enabled = new Gtk.Switch({
@@ -402,6 +725,14 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         });
         enabled.connect('notify::active', () => {
             step.enabled = enabled.get_active();
+            // Updated in place rather than rebuilt: a rebuild here would tear
+            // down the switch you just flicked.
+            if (step.enabled) {
+                row.remove_css_class('dim-label');
+            } else {
+                row.add_css_class('dim-label');
+            }
+            row.set_subtitle(this._stepSubtitle(step));
             this._save();
         });
         row.add_prefix(enabled);
@@ -434,14 +765,32 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             row.add_row(child);
         }
 
-        // Nested bodies.
-        for (const list of childLists(step)) {
+        // Nested bodies. Each is its own block: coloured rail, own icon, and the
+        // steps inside it indented one step further under that rail.
+        for (const list of children) {
+            const kind: BranchKind =
+                list.key === 'then' || list.key === 'else' ? list.key : 'body';
+            const style = BRANCH_STYLE[kind];
             const nested = this._expander(`${stepKey}:${list.key}`, {
-                title: list.key === 'else' ? _('Else') : list.key === 'then' ? _('Then') : _('Body'),
-                subtitle: `${list.steps.length} ${list.steps.length === 1 ? _('step') : _('steps')}`,
-            });
+                title: _(style.title),
+                subtitle: `${this._countLabel(list.steps.length)} — ${_(style.hint)}`,
+            }, list.steps.length > 0);
+            nested.set_margin_start(indent + INDENT_PX);
+            nested.add_css_class('clickmate-branch');
+            nested.add_css_class(`clickmate-branch-${kind}`);
+            nested.add_prefix(new Gtk.Image({
+                icon_name: style.icon,
+                valign: Gtk.Align.CENTER,
+            }));
+            branchRows.push(nested);
+            widgets.push(nested);
 
             const addNested = new Adw.ActionRow({ title: _('Add a step here') });
+            addNested.set_margin_start(INDENT_PX);   // lines up with the steps below it
+            addNested.add_prefix(new Gtk.Image({
+                icon_name: 'list-add-symbolic',
+                valign: Gtk.Align.CENTER,
+            }));
             const nestedModel = new Gtk.StringList();
             for (const kind of STEP_KINDS) {
                 nestedModel.append(STEP_KIND_LABELS[kind]);
@@ -465,12 +814,13 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             nested.add_row(addNested);
 
             for (const child of list.steps) {
-                nested.add_row(this._buildStepRow(macro, child));
+                for (const widget of this._buildStepWidgets(macro, child, INDENT_PX)) {
+                    nested.add_row(widget);
+                }
             }
-            row.add_row(nested);
         }
 
-        return row;
+        return widgets;
     }
 
     private _buildStepFields(macro: Macro, step: Step): Gtk.Widget[] {
@@ -792,19 +1142,33 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     // --- import / export ---------------------------------------------------
 
+    /** An Export / Import pair over one file. */
+    private _transferRow(
+        title: string, subtitle: string, onExport: () => void, onImport: () => void,
+    ): Adw.ActionRow {
+        const row = new Adw.ActionRow({ title, subtitle });
+        const exportButton = new Gtk.Button({ label: _('Export'), valign: Gtk.Align.CENTER });
+        exportButton.connect('clicked', onExport);
+        const importButton = new Gtk.Button({ label: _('Import'), valign: Gtk.Align.CENTER });
+        importButton.connect('clicked', onImport);
+        row.add_suffix(exportButton);
+        row.add_suffix(importButton);
+        return row;
+    }
+
     private _exportDocument(): void {
-        const path = GLib.build_filenamev([GLib.get_home_dir(), 'clickmate-macros.json']);
+        const path = homeFile(MACROS_FILE);
         const json = stringifyDocument(this._store.document);
         try {
             GLib.file_set_contents(path, JSON.stringify(JSON.parse(json), null, 2));
-            this._toast(`Exported to ${path}`);
+            this._toast(`Exported ${this._store.macros.length} macros to ${path}`);
         } catch (error) {
             this._toast(`Export failed: ${(error as Error).message}`);
         }
     }
 
     private _importDocument(): void {
-        const path = GLib.build_filenamev([GLib.get_home_dir(), 'clickmate-macros.json']);
+        const path = homeFile(MACROS_FILE);
         try {
             const [ok, contents] = GLib.file_get_contents(path);
             if (!ok) {
@@ -819,8 +1183,99 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         }
     }
 
+    /**
+     * Everything on the other three pages. Values are written in GVariant text
+     * form — `'a string'`, `1280`, `['<Control>r']` — which is one notation that
+     * covers every type in the schema and can be checked against it on the way
+     * back in, so a hand-edited file cannot put a bad value into dconf.
+     */
+    private _exportSettings(): void {
+        const path = homeFile(SETTINGS_FILE);
+        const values: Record<string, string> = {};
+        for (const key of this._settings.settings_schema.list_keys()) {
+            if (isTransferableKey(key)) {
+                values[key] = this._settings.get_value(key).print(false);
+            }
+        }
+        try {
+            const file = { type: 'clickmate-settings', version: 1, settings: values };
+            GLib.file_set_contents(path, `${JSON.stringify(file, null, 2)}\n`);
+            this._toast(`Exported ${Object.keys(values).length} settings to ${path}`);
+        } catch (error) {
+            this._toast(`Settings export failed: ${(error as Error).message}`);
+        }
+    }
+
+    private _importSettings(): void {
+        const path = homeFile(SETTINGS_FILE);
+        try {
+            const [ok, contents] = GLib.file_get_contents(path);
+            if (!ok) {
+                throw new Error('could not read the file');
+            }
+            const parsed = JSON.parse(new TextDecoder().decode(contents)) as {
+                settings?: Record<string, string>;
+            };
+            if (!parsed.settings || typeof parsed.settings !== 'object') {
+                throw new Error('no settings in the file');
+            }
+
+            const schema = this._settings.settings_schema;
+            const skipped: string[] = [];
+            let applied = 0;
+            for (const [key, text] of Object.entries(parsed.settings)) {
+                if (!isTransferableKey(key) || !schema.has_key(key)) {
+                    skipped.push(key);   // from another version, or not ours to write
+                    continue;
+                }
+                const schemaKey = schema.get_key(key);
+                let value: GLib.Variant;
+                try {
+                    value = GLib.Variant.parse(schemaKey.get_value_type(), text, null, null);
+                } catch {
+                    skipped.push(key);
+                    continue;
+                }
+                // Out-of-range values are a hard error inside GSettings, so they
+                // are dropped here rather than taking the whole import down.
+                if (!schemaKey.range_check(value)) {
+                    skipped.push(key);
+                    continue;
+                }
+                this._settings.set_value(key, value);
+                applied++;
+            }
+
+            this._addSettingsPages();
+            const ignored = skipped.length > 0 ? `, ignored ${skipped.join(', ')}` : '';
+            this._toast(`Imported ${applied} settings from ${path}${ignored}`);
+        } catch (error) {
+            this._toast(`Settings import failed: ${(error as Error).message}`);
+        }
+    }
+
+    /** Build the non-macro pages, replacing them if they are already there. */
+    private _addSettingsPages(): void {
+        const window = this._window;
+        if (!window) {
+            return;
+        }
+        for (const page of this._settingsPages) {
+            window.remove(page);
+        }
+        this._settingsPages = [this._buildLlmPage(), this._buildInputPage(), this._buildShortcutsPage()];
+        for (const page of this._settingsPages) {
+            window.add(page);
+        }
+    }
+
+    /** Adwaita's own toast where the window has one, the journal either way. */
     private _toast(message: string): void {
         log(`clickmate: ${message}`);
+        const window = this._window as unknown as { add_toast?: (toast: object) => void } | undefined;
+        if (typeof window?.add_toast === 'function') {
+            window.add_toast(new Adw.Toast({ title: message, timeout: 5 }));
+        }
     }
 
     /**
@@ -911,43 +1366,74 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const endpoint = new Adw.EntryRow({ title: _('Endpoint') });
         endpoint.set_text(this._settings.get_string('llm-endpoint'));
-        const warning = new Adw.ActionRow({
-            title: _('This endpoint is not on this machine'),
-            subtitle: _('Every check uploads a picture of your screen to it.'),
-            css_classes: ['error'],
-        });
-        const updateWarning = () => {
-            warning.visible = !isLoopbackEndpoint(endpoint.get_text() ?? '');
-        };
         const commitEndpoint = debounce(() => {
             this._settings.set_string('llm-endpoint', endpoint.get_text() ?? '');
-            updateWarning();
         });
         endpoint.connect('changed', commitEndpoint);
         group.add(endpoint);
-        group.add(warning);
-        updateWarning();
 
-        group.add(entryRow(_('Model'), this._settings.get_string('llm-model'), text => {
+        const model = entryRow(_('Model'), this._settings.get_string('llm-model'), text => {
             this._settings.set_string('llm-model', text);
-        }));
-        group.add(entryRow(_('API key (usually empty locally)'), this._settings.get_string('llm-api-key'), text => {
+        });
+        group.add(model);
+        const apiKey = entryRow(_('API key (usually empty locally)'), this._settings.get_string('llm-api-key'), text => {
             this._settings.set_string('llm-api-key', text);
-        }));
+        });
+        group.add(apiKey);
         group.add(spinRow(_('Timeout (ms)'), this._settings.get_int('llm-timeout-ms'), 1000, 300000, 1000, value => {
             this._settings.set_int('llm-timeout-ms', Math.round(value));
         }));
+
+        const testRow = new Adw.ActionRow({
+            title: _('Test the connection'),
+            subtitle: _('Sends one small picture and reports what comes back'),
+        });
+        const testButton = new Gtk.Button({ label: _('Test'), valign: Gtk.Align.CENTER });
+        testRow.add_suffix(testButton);
+        testButton.connect('clicked', () => {
+            for (const style of ['error', 'warning', 'success']) {
+                testRow.remove_css_class(style);
+            }
+            testButton.sensitive = false;
+            testRow.subtitle = _('Asking the model…');
+
+            // Read straight off the rows, not out of settings: their writes are
+            // debounced, and testing what is on screen is what you meant.
+            void testConnection({
+                endpoint: endpoint.get_text() ?? '',
+                model: model.get_text() ?? '',
+                apiKey: apiKey.get_text() ?? '',
+                timeoutMs: this._settings.get_int('llm-timeout-ms'),
+            }).then(result => {
+                testButton.sensitive = true;
+                if (!result.ok) {
+                    testRow.add_css_class('error');
+                    testRow.subtitle = result.message;
+                } else if (result.sawImage) {
+                    testRow.add_css_class('success');
+                    testRow.subtitle = `Answered in ${result.latencyMs} ms — “${result.message}”`;
+                } else {
+                    // Reachable and talking, but blind: almost always a model
+                    // name that is not the vision one.
+                    testRow.add_css_class('warning');
+                    testRow.subtitle = `Answered in ${result.latencyMs} ms, but called a plain red ` +
+                        `picture something else — check that “${model.get_text()}” can see images`;
+                }
+            });
+        });
+        group.add(testRow);
         page.add(group);
 
         const imageGroup = new Adw.PreferencesGroup({
             title: _('Screenshots'),
-            description: _('Smaller images mean faster answers. Restricting a condition to a screen area helps more than either setting.'),
+            description: _('Sent as PNG, so text stays sharp. Smaller images mean faster answers, and restricting a condition to a screen area helps more than scaling does.'),
         });
-        imageGroup.add(spinRow(_('Maximum width (px)'), this._settings.get_int('llm-max-width'), 128, 4096, 64, value => {
-            this._settings.set_int('llm-max-width', Math.round(value));
-        }));
-        imageGroup.add(spinRow(_('JPEG quality'), this._settings.get_int('llm-jpeg-quality'), 30, 100, 5, value => {
-            this._settings.set_int('llm-jpeg-quality', Math.round(value));
+        const scale = scaleWidthFor(this._settings.get_int('llm-max-width'));
+        if (Number(scale) !== this._settings.get_int('llm-max-width')) {
+            this._settings.set_int('llm-max-width', Number(scale));   // so the row is not lying
+        }
+        imageGroup.add(comboRow(_('Scale down to'), SCALE_WIDTHS, SCALE_LABELS, scale, value => {
+            this._settings.set_int('llm-max-width', Number(value));
         }));
         page.add(imageGroup);
 
@@ -977,12 +1463,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             _('Turn pauses longer than this into waits (ms, 0 = never)'),
             this._settings.get_int('record-gap-ms'), 0, 60000, 10,
             value => this._settings.set_int('record-gap-ms', Math.round(value)),
-        ));
-        recording.add(switchRow(
-            _('Record pointer movement'),
-            _('Adds a move step wherever the pointer comes to rest. A move that ends in a click is left out, since the click already carries that position.'),
-            this._settings.get_boolean('record-motion'),
-            value => this._settings.set_boolean('record-motion', value),
         ));
         page.add(recording);
 

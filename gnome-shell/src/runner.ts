@@ -31,16 +31,29 @@ import type {
     WaitStep,
 } from './model.js';
 import { describeStep } from './model.js';
+import { reportProblem } from './problems.js';
 import type { Config } from './store.js';
 
 export type FinishReason = 'done' | 'stopped' | 'error';
 
 type Signal = 'normal' | 'break' | 'continue' | 'stop';
 
+/** One entry of the chain of steps the runner is inside. */
+export interface RunningStep {
+    id: string;
+    label: string;
+}
+
 export interface RunnerCallbacks {
     onStatus?: (text: string) => void;
     onFinished?: (reason: FinishReason, error?: Error) => void;
     onRunningChanged?: (running: boolean) => void;
+    /**
+     * The step that just started, preceded by the loops and ifs it sits in.
+     * Emitted on entry only: when a body ends, the highlight staying on its last
+     * step until the next one begins is what you want to look at anyway.
+     */
+    onStepsChanged?: (path: RunningStep[]) => void;
     /**
      * Asked before each step. Return true to hold the run. Pull rather than
      * push, so nothing has to be wired into the input path to answer it.
@@ -66,6 +79,8 @@ export class MacroRunner {
     private _wakeSleep: (() => void) | null = null;
     private _warnedAboutMotion = false;
     private _paused = false;
+    private _path: RunningStep[] = [];
+    private _failedAt = '';
 
     constructor(
         daemon: DaemonClient,
@@ -125,6 +140,8 @@ export class MacroRunner {
         this._cancelled = false;
         this._paused = false;
         this._warnedAboutMotion = false;
+        this._path = [];
+        this._failedAt = '';
         this._callbacks.onRunningChanged?.(true);
         this._status(`Running “${macro.name}”`);
 
@@ -144,10 +161,15 @@ export class MacroRunner {
             } else {
                 reason = 'error';
                 failure = error as Error;
-                logError(error as Error, 'clickmate: macro failed');
+                reportProblem('Macro', `“${macro.name}” stopped: ${failure.message}`, {
+                    where: this._failedAt,
+                    error: failure,
+                });
             }
         } finally {
             this._running = false;
+            this._path = [];
+            this._callbacks.onStepsChanged?.([]);
             this._callbacks.onRunningChanged?.(false);
         }
 
@@ -166,15 +188,22 @@ export class MacroRunner {
         }
         this._running = true;
         this._cancelled = false;
+        this._path = [];
+        this._failedAt = '';
         this._callbacks.onRunningChanged?.(true);
         try {
             await this._runStep(step);
             this._status(`Ran: ${describeStep(step)}`);
         } catch (error) {
             this._status(`Failed: ${(error as Error).message}`);
-            logError(error as Error, 'clickmate: step failed');
+            reportProblem('Step', (error as Error).message, {
+                where: describeStep(step),
+                error: error as Error,
+            });
         } finally {
             this._running = false;
+            this._path = [];
+            this._callbacks.onStepsChanged?.([]);
             this._callbacks.onRunningChanged?.(false);
         }
     }
@@ -189,7 +218,12 @@ export class MacroRunner {
         this._cancelled = true;
         this._wakeNow();
         void this._daemon.stop().catch(error => {
-            log(`clickmate: stop request failed: ${(error as Error).message}`);
+            // Worth surfacing: this is the request that releases a held key, so
+            // failing it can leave a modifier stuck down.
+            reportProblem('Daemon', `could not send the stop request: ${(error as Error).message}`, {
+                hint: 'A key or button held by the macro may still be down. Check that the ' +
+                    'clickmate service is running: systemctl status clickmate.',
+            });
         });
     }
 
@@ -216,9 +250,29 @@ export class MacroRunner {
         if (step.enabled === false) {
             return 'normal';
         }
-        this._status(describeStep(step));
 
-        return this._execute(step);
+        // A container stays on the path for as long as its body runs, so the
+        // editor can mark the loop you are in as well as the step inside it.
+        this._path.push({ id: step.id, label: describeStep(step) });
+        this._callbacks.onStepsChanged?.([...this._path]);
+        try {
+            return await this._execute(step);
+        } catch (error) {
+            // Each frame pops the path on the way out, so by the time run() sees
+            // the throw the trail is gone. The innermost frame runs first, which
+            // is why the first one to write wins.
+            if (!this._failedAt) {
+                this._failedAt = this._where();
+            }
+            throw error;
+        } finally {
+            this._path.pop();
+        }
+    }
+
+    /** The chain of steps currently being executed, as a breadcrumb. */
+    private _where(): string {
+        return this._path.map(entry => entry.label).join(' › ');
     }
 
     private async _execute(step: Step): Promise<Signal> {
@@ -352,8 +406,11 @@ export class MacroRunner {
             this._warnedAboutMotion = true;
             const [px, py] = global.get_pointer();
             this._status(`Pointer stopped at ${Math.round(px)},${Math.round(py)} instead of ${x},${y}`);
-            log('clickmate: absolute move did not converge. If the target grabs the pointer ' +
-                '(games with mouse look), record relative motion instead of using absolute clicks.');
+            reportProblem('Step', `the pointer stopped at ${Math.round(px)},${Math.round(py)} instead of ${x},${y}`, {
+                where: this._where(),
+                hint: 'Everything after this clicked in the wrong place. If the target grabs the ' +
+                    'pointer (games with mouse look), record relative motion instead of absolute clicks.',
+            });
         }
     }
 

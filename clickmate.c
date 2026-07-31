@@ -28,6 +28,8 @@
 #include <dirent.h>
 #include <strings.h>
 #include <limits.h>
+#include <sys/inotify.h>
+#include <poll.h>
 
 #define SOCKET_PATH       "/var/run/click-socket"
 #define EVENT_SOCKET_PATH "/var/run/clickmate-events"
@@ -42,17 +44,33 @@
 
 struct captured_device {
     char *path;
-    int fdi;              // real device, grabbed (-1 for synthetic devices)
+    int fdi;              // real device, grabbed (-1 for synthetic or detached)
     int fdo;              // uinput clone
     pthread_t reader;
     bool grabbed;
+    bool alive;           // a reader thread is currently on fdi
     int cls;              // bitmask of CLASS_*
     int index;
     char name[64];
+    char wanted[256];     // the -n name or -d path that owns this slot
 };
 
 static struct captured_device devices[MAX_DEVICES];
 static int device_count = 0;
+
+// Guards devices[] and device_count against the monitor thread attaching a
+// device while playback is picking one. Slots are never freed or moved, so a
+// pointer handed out by device_for() stays valid after the lock is dropped.
+static pthread_mutex_t devices_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// What was asked for on the command line, kept so the monitor thread can match
+// a newly appeared device against it.
+struct device_spec {
+    bool by_name;
+    const char *value;
+};
+static struct device_spec specs[MAX_DEVICES * 2];
+static int spec_count = 0;
 
 static volatile sig_atomic_t keep_running = 1;
 static struct MHD_Daemon *http_daemon = NULL;
@@ -371,14 +389,18 @@ static bool create_clone(struct captured_device *d, const char *name, int forced
         return false;
     }
 
+    // Every failure past this point closes fdo. A half-built clone used to be
+    // harmless because the only caller gave up and exited; now that a failed
+    // attach is retried on the next hotplug event, leaving it open would leak a
+    // /dev/uinput descriptor per attempt.
     if (ioctl(d->fdo, UI_DEV_SETUP, &usetup) < 0) {
         fprintf(stderr, "Error: Failed to configure virtual device [%s]: %s.\n", name, strerror(errno));
-        return false;
+        goto fail;
     }
 
     int cls = forced_class;
     if (d->fdi >= 0 && !mirror_capabilities(d, &cls)) {
-        return false;
+        goto fail;
     }
     if (cls == 0) {
         // Unclassifiable real device: allow both so injection still has a home.
@@ -388,16 +410,21 @@ static bool create_clone(struct captured_device *d, const char *name, int forced
 
     if (!add_injection_capabilities(d->fdo, cls)) {
         fprintf(stderr, "Error: Failed to add injection capabilities to [%s]: %s.\n", name, strerror(errno));
-        return false;
+        goto fail;
     }
 
     if (ioctl(d->fdo, UI_DEV_CREATE) < 0) {
         fprintf(stderr, "Error: Cannot create virtual device [%s]: %s.\n", name, strerror(errno));
-        return false;
+        goto fail;
     }
 
     usleep(200000); // let udev settle before anything writes to it
     return true;
+
+fail:
+    close(d->fdo);
+    d->fdo = -1;
+    return false;
 }
 
 static void* reader_thread(void *arg) {
@@ -431,7 +458,30 @@ static void* reader_thread(void *arg) {
         }
     }
 
-    printf("[DEBUG] Reader thread for %s stopping\n", d->path);
+    // Unplugging a device — or restarting whatever created it, which is what
+    // happens every time dvorak is reconfigured upstream — makes read() fail
+    // with ENODEV. Give the slot back so the monitor thread can reattach when
+    // the device returns. The clone stays: injection through it keeps working,
+    // and the desktop does not see the device node disappear and reappear.
+    //
+    // On shutdown release_devices() owns these fds — it runs from the signal
+    // handler, where taking a mutex is not safe — so leave them alone here
+    // rather than racing it into a double close.
+    if (!keep_running) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&devices_mutex);
+    if (d->fdi >= 0) {
+        ioctl(d->fdi, EVIOCGRAB, 0);
+        close(d->fdi);
+        d->fdi = -1;
+    }
+    d->grabbed = false;
+    d->alive = false;
+    pthread_mutex_unlock(&devices_mutex);
+
+    fprintf(stderr, "clickmate: detached %s\n", d->path ? d->path : d->name);
     return NULL;
 }
 
@@ -451,24 +501,33 @@ static struct captured_device *device_for(unsigned int type, unsigned int code) 
         want = 0;
     }
 
-    if (want == 0) {
-        return device_count > 0 ? &devices[0] : NULL;
-    }
+    // Injection goes to the clone, which outlives the real device, so a slot
+    // whose source is currently unplugged is still a perfectly good target.
+    struct captured_device *found = NULL;
+    pthread_mutex_lock(&devices_mutex);
 
+    if (want == 0) {
+        found = device_count > 0 ? &devices[0] : NULL;
+    }
     // Prefer a device dedicated to this class. Combined receivers (a Logitech
     // unifying mouse advertises KEY_ESC and so on) otherwise swallow every
     // keystroke into the mouse clone just because they come first.
-    for (int i = 0; i < device_count; i++) {
+    for (int i = 0; !found && i < device_count; i++) {
         if (devices[i].cls == want) {
-            return &devices[i];
+            found = &devices[i];
         }
     }
-    for (int i = 0; i < device_count; i++) {
+    for (int i = 0; !found && i < device_count; i++) {
         if (devices[i].cls & want) {
-            return &devices[i];
+            found = &devices[i];
         }
     }
-    return device_count > 0 ? &devices[0] : NULL;
+    if (!found && device_count > 0) {
+        found = &devices[0];
+    }
+
+    pthread_mutex_unlock(&devices_mutex);
+    return found;
 }
 
 static void sleep_us_abortable(long long us) {
@@ -544,19 +603,24 @@ static enum MHD_Result send_json(struct MHD_Connection *connection, unsigned int
 }
 
 static enum MHD_Result send_status(struct MHD_Connection *connection) {
-    char body[1024];
-    char devs[768];
+    // Sized for MAX_DEVICES entries at their longest: a truncated object here
+    // would be invalid JSON at the other end, not merely a shortened list.
+    char body[3072];
+    char devs[2560];
     size_t off = 0;
 
     devs[0] = '\0';
+    pthread_mutex_lock(&devices_mutex);
     for (int i = 0; i < device_count && off < sizeof(devs) - 1; i++) {
         int n = snprintf(devs + off, sizeof(devs) - off,
-                         "%s{\"index\":%d,\"name\":\"%s\",\"path\":\"%s\",\"grabbed\":%s,\"keyboard\":%s,\"pointer\":%s}",
+                         "%s{\"index\":%d,\"name\":\"%s\",\"path\":\"%s\",\"grabbed\":%s,\"alive\":%s,\"wanted\":\"%s\",\"keyboard\":%s,\"pointer\":%s}",
                          i ? "," : "",
                          devices[i].index,
                          devices[i].name,
                          devices[i].path ? devices[i].path : "",
                          devices[i].grabbed ? "true" : "false",
+                         devices[i].alive ? "true" : "false",
+                         devices[i].wanted,
                          (devices[i].cls & CLASS_KEYBOARD) ? "true" : "false",
                          (devices[i].cls & CLASS_POINTER) ? "true" : "false");
         if (n < 0) {
@@ -564,6 +628,7 @@ static enum MHD_Result send_status(struct MHD_Connection *connection) {
         }
         off += (size_t)n;
     }
+    pthread_mutex_unlock(&devices_mutex);
 
     snprintf(body, sizeof(body),
              "{\"version\":%d,\"recording\":%s,\"playing\":%s,\"devices\":[%s]}",
@@ -797,18 +862,35 @@ static void usage(const char *path) {
     fprintf(stderr, "         \tpath under /dev/input/by-id. Names are listed by:\n");
     fprintf(stderr, "         \t  grep '^N: Name' /proc/bus/input/devices\n");
     fprintf(stderr, "  At most %d devices in total.\n", MAX_DEVICES);
+    fprintf(stderr, "\nDevices do not have to exist at startup: /dev/input is watched, and\n");
+    fprintf(stderr, "anything matching is captured when it appears and reattached when it\n");
+    fprintf(stderr, "comes back after being unplugged.\n");
     fprintf(stderr, "example: %s -n 'Logitech K400 Plus' -d /dev/input/by-id/usb-…-event-kbd\n", basename);
 }
 
-static bool setup_device(const char *path) {
+static void start_reader(struct captured_device *d) {
+    if (pthread_create(&d->reader, NULL, reader_thread, d) != 0) {
+        fprintf(stderr, "Error: Failed to start reader thread for %s\n", d->path);
+        return;
+    }
+    // Nothing ever joins a reader: one device can come and go many times in a
+    // session, and every reattach starts a fresh thread.
+    pthread_detach(d->reader);
+}
+
+// Caller holds devices_mutex.
+static bool setup_device(const char *path, const char *wanted) {
     struct captured_device *d = &devices[device_count];
     memset(d, 0, sizeof(*d));
     d->index = device_count;
     d->path = strdup(path);
+    snprintf(d->wanted, sizeof(d->wanted), "%s", wanted);
     d->fdi = open(path, O_RDONLY);
     if (d->fdi < 0) {
         fprintf(stderr, "Error: Failed to open device [%s]: %s.\n", path, strerror(errno));
         fprintf(stderr, "Hint: Check the device path and that you have permission to read it.\n");
+        free(d->path);
+        d->path = NULL;
         return false;
     }
 
@@ -816,6 +898,9 @@ static bool setup_device(const char *path) {
     snprintf(clone_name, sizeof(clone_name), "Clickmate Virtual Device %d", device_count);
     if (!create_clone(d, clone_name, 0)) {
         close(d->fdi);
+        d->fdi = -1;
+        free(d->path);
+        d->path = NULL;
         return false;
     }
 
@@ -838,71 +923,214 @@ static bool setup_device(const char *path) {
             (d->cls & CLASS_KEYBOARD) ? " [keys]" : "",
             (d->cls & CLASS_POINTER) ? " [pointer]" : "");
 
+    d->alive = true;
     device_count++;
     return true;
 }
 
-static int compare_paths(const void *a, const void *b) {
-    return strcmp((const char *)a, (const char *)b);
+/**
+ * Bind one device node to a slot. A device that was captured before and has
+ * since gone away keeps its slot, so plugging it back in resumes where it left
+ * off instead of consuming a second slot.
+ *
+ * Caller holds devices_mutex.
+ */
+static bool attach_device(const char *path, const char *wanted) {
+    for (int i = 0; i < device_count; i++) {
+        if (devices[i].alive && devices[i].path && strcmp(devices[i].path, path) == 0) {
+            return false;
+        }
+    }
+
+    for (int i = 0; i < device_count; i++) {
+        struct captured_device *d = &devices[i];
+        if (d->alive || d->wanted[0] == '\0' || strcmp(d->wanted, wanted) != 0) {
+            continue;
+        }
+
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            return false;
+        }
+
+        free(d->path);
+        d->path = strdup(path);
+        d->fdi = fd;
+
+        if (ioctl(fd, EVIOCGRAB, 1) < 0) {
+            fprintf(stderr, "Warning: Cannot grab [%s]: %s. Running observe-only for this device.\n",
+                    path, strerror(errno));
+            d->grabbed = false;
+        } else {
+            d->grabbed = true;
+        }
+
+        // The clone is deliberately not rebuilt. A device returning under the
+        // same name reports the same capabilities, and tearing the clone down
+        // would make the desktop lose and re-find the input device — and lose
+        // any modifier state along with it — on every reconnect.
+        d->alive = true;
+        fprintf(stderr, "clickmate: reattached %s as %s%s\n",
+                path, d->name, d->grabbed ? "" : " (not grabbed)");
+        start_reader(d);
+        return true;
+    }
+
+    if (device_count >= MAX_DEVICES) {
+        fprintf(stderr, "Warning: no slot left for %s (limit is %d devices).\n", path, MAX_DEVICES);
+        return false;
+    }
+    if (!setup_device(path, wanted)) {
+        return false;
+    }
+    start_reader(&devices[device_count - 1]);
+    return true;
+}
+
+#define MAX_SCAN 64
+
+struct scan_entry {
+    char path[288];
+    char name[256];
+};
+
+static int compare_scan(const void *a, const void *b) {
+    return strcmp(((const struct scan_entry *)a)->path, ((const struct scan_entry *)b)->path);
 }
 
 /**
- * Capture every device reporting this exact name. Devices paired through a
- * wireless receiver get no /dev/input/by-id entry, so a path is not something
- * you can rely on for them; the name is.
+ * Match every node in /dev/input against what was asked for and attach whatever
+ * is missing. Devices paired through a wireless receiver get no
+ * /dev/input/by-id entry, so a path is not something you can rely on for them;
+ * the name is.
+ *
+ * Called once at startup and again whenever a device node appears, which is
+ * what makes the daemon indifferent to whether it started before or after the
+ * devices it wants.
  */
-static bool setup_devices_by_name(const char *wanted) {
+static void rescan(bool verbose) {
+    // Only ever entered from main before the threads exist and from the single
+    // monitor thread after that, so static storage is safe here and keeps 35 KB
+    // off the stack.
+    static struct scan_entry found[MAX_SCAN];
+    int found_count = 0;
+
     DIR *dir = opendir("/dev/input");
     if (!dir) {
         perror("opendir /dev/input");
-        return false;
+        return;
     }
 
-    char matches[MAX_DEVICES][PATH_MAX];
-    int match_count = 0;
     struct dirent *entry;
-
-    while ((entry = readdir(dir)) != NULL) {
+    while ((entry = readdir(dir)) != NULL && found_count < MAX_SCAN) {
         if (strncmp(entry->d_name, "event", 5) != 0) {
             continue;
         }
 
-        char path[PATH_MAX];
-        snprintf(path, sizeof(path), "/dev/input/%s", entry->d_name);
+        struct scan_entry *e = &found[found_count];
+        snprintf(e->path, sizeof(e->path), "/dev/input/%s", entry->d_name);
 
-        int fd = open(path, O_RDONLY);
+        int fd = open(e->path, O_RDONLY);
         if (fd < 0) {
             continue;
         }
-
-        char name[256] = {0};
-        if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0
-            && strcasecmp(name, wanted) == 0
-            // Never grab our own clones: that would feed every event straight
-            // back into itself.
-            && strncmp(name, "Clickmate", 9) != 0
-            && match_count < MAX_DEVICES) {
-            snprintf(matches[match_count++], PATH_MAX, "%s", path);
-        }
+        e->name[0] = '\0';
+        bool named = ioctl(fd, EVIOCGNAME(sizeof(e->name) - 1), e->name) >= 0;
         close(fd);
+
+        // Never look at our own clones: capturing one would feed every event
+        // straight back into itself.
+        if (named && strncmp(e->name, "Clickmate", 9) != 0) {
+            found_count++;
+        }
     }
     closedir(dir);
 
-    if (match_count == 0) {
-        fprintf(stderr, "Warning: no input device is named \"%s\".\n", wanted);
-        fprintf(stderr, "Hint: grep '^N: Name' /proc/bus/input/devices\n");
-        return false;
-    }
+    // readdir order is arbitrary; sort so that two devices sharing a name — the
+    // two halves of a keyboard, say — always land in the same slots.
+    qsort(found, found_count, sizeof(found[0]), compare_scan);
 
-    // readdir order is arbitrary; sort so the device order stays predictable.
-    qsort(matches, match_count, PATH_MAX, compare_paths);
+    for (int s = 0; s < spec_count; s++) {
+        int matched = 0;
 
-    for (int i = 0; i < match_count; i++) {
-        if (!setup_device(matches[i])) {
-            return false;
+        pthread_mutex_lock(&devices_mutex);
+        for (int i = 0; i < found_count; i++) {
+            bool hit = specs[s].by_name
+                ? strcasecmp(found[i].name, specs[s].value) == 0
+                : strcmp(found[i].path, specs[s].value) == 0;
+            if (hit) {
+                matched++;
+                attach_device(found[i].path, specs[s].value);
+            }
+        }
+        // A -d path is often a by-id symlink, which the scan above never sees.
+        if (!specs[s].by_name && matched == 0 && access(specs[s].value, R_OK) == 0) {
+            matched += attach_device(specs[s].value, specs[s].value) ? 1 : 0;
+        }
+        pthread_mutex_unlock(&devices_mutex);
+
+        if (matched == 0 && verbose) {
+            if (specs[s].by_name) {
+                fprintf(stderr, "Warning: no input device is named \"%s\" yet. Waiting for it.\n",
+                        specs[s].value);
+                fprintf(stderr, "Hint: grep '^N: Name' /proc/bus/input/devices\n");
+            } else {
+                fprintf(stderr, "Warning: no device at %s yet. Waiting for it.\n", specs[s].value);
+            }
         }
     }
-    return true;
+}
+
+/**
+ * Watch /dev/input so a device that turns up later gets captured without
+ * restarting the daemon: a wireless mouse that pairs seconds into boot, or a
+ * keyboard whose upstream remapper was reconfigured and rebuilt its virtual
+ * device. Without this the daemon's view of the world is fixed at the instant
+ * it started, and losing that race is silent — a warning in the journal and a
+ * macro that does nothing.
+ */
+static void *monitor_thread(void *arg) {
+    (void)arg;
+
+    int fd = inotify_init1(IN_NONBLOCK);
+    if (fd < 0) {
+        perror("inotify_init1");
+        fprintf(stderr, "Warning: hotplug disabled; devices are captured at startup only.\n");
+        return NULL;
+    }
+
+    // IN_ATTRIB as well as IN_CREATE: udev sets permissions after the node
+    // appears, so an open can lose that race and the chmod is the second chance.
+    if (inotify_add_watch(fd, "/dev/input", IN_CREATE | IN_ATTRIB) < 0) {
+        perror("inotify_add_watch /dev/input");
+        close(fd);
+        return NULL;
+    }
+
+    char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+
+    while (keep_running) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        // Poll rather than block, so a quiet /dev/input does not hold up
+        // shutdown for as long as nobody touches a keyboard.
+        if (poll(&pfd, 1, 1000) <= 0) {
+            continue;
+        }
+
+        // The queued events are drained but not read: a full rescan costs one
+        // pass over ~30 device nodes and cannot miss anything that slipped
+        // through while the queue was overflowing.
+        while (read(fd, buf, sizeof buf) > 0) {
+        }
+
+        // The node exists before udev has finished with it; grabbing this early
+        // works but the capability mirroring can come up short.
+        usleep(150000);
+        rescan(false);
+    }
+
+    close(fd);
+    return NULL;
 }
 
 // If no captured device can carry a whole device class, add an ungrabbed uinput
@@ -944,8 +1172,6 @@ int main(int argc, char *argv[]) {
     signal(SIGABRT, sig_handler);
 
     int opt;
-    struct { bool by_name; const char *value; } specs[MAX_DEVICES * 2];
-    int spec_count = 0;
 
     while ((opt = getopt(argc, argv, "d:n:h")) != -1) {
         switch (opt) {
@@ -974,21 +1200,14 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // A name that matches nothing is a warning, not a failure: an unplugged
-    // mouse should not stop the keyboard from being captured.
-    for (int i = 0; i < spec_count; i++) {
-        bool ok = specs[i].by_name
-            ? setup_devices_by_name(specs[i].value)
-            : setup_device(specs[i].value);
-        if (!ok && !specs[i].by_name) {
-            release_devices();
-            return EXIT_FAILURE;
-        }
-    }
+    // A device that is not there is a warning, not a failure. It may simply not
+    // have appeared yet — a wireless mouse pairing, or an upstream remapper
+    // still building the virtual keyboard this daemon sits behind — and the
+    // monitor thread picks it up whenever it does show up.
+    rescan(true);
 
     if (device_count == 0) {
-        fprintf(stderr, "Error: none of the requested devices could be captured.\n");
-        return EXIT_FAILURE;
+        fprintf(stderr, "Warning: nothing captured yet. Waiting for the requested devices.\n");
     }
 
     if (!ensure_class(CLASS_KEYBOARD, "Clickmate Virtual Keyboard") ||
@@ -1031,14 +1250,10 @@ int main(int argc, char *argv[]) {
     pthread_t stream_thread;
     pthread_create(&stream_thread, NULL, stream_accept_thread, NULL);
 
-    for (int i = 0; i < device_count; i++) {
-        if (devices[i].fdi < 0) {
-            continue;
-        }
-        if (pthread_create(&devices[i].reader, NULL, reader_thread, &devices[i]) != 0) {
-            fprintf(stderr, "Error: Failed to start reader thread for %s\n", devices[i].path);
-        }
-    }
+    // Readers are started by attach_device(), so devices captured during
+    // rescan() above are already running by now.
+    pthread_t hotplug_thread;
+    pthread_create(&hotplug_thread, NULL, monitor_thread, NULL);
 
     printf("[DEBUG] Listening on %s and %s\n", SOCKET_PATH, EVENT_SOCKET_PATH);
 

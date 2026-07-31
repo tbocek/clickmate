@@ -3,6 +3,7 @@
 // observes evdev events.
 
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
@@ -14,7 +15,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { ConditionEvaluator, type EvaluationTrace } from './src/conditions.js';
 import { DaemonClient } from './src/daemon.js';
-import { MacroRunner } from './src/runner.js';
+import { MacroRunner, type RunningStep } from './src/runner.js';
 import { Recorder, acceleratorToEvdevCodes } from './src/recorder.js';
 import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
@@ -22,12 +23,20 @@ import {
     childLists, describeStep, findStep, lastPointerEndpoint, reachesEnd,
     type Macro, type Step,
 } from './src/model.js';
+import { clearProblems, onProblemsChanged, problemCount, reportProblem } from './src/problems.js';
 import { MacroPopup } from './ui/popup.js';
 import { clearMarker, pickRegion, showMarker } from './ui/overlay.js';
 
 const KEYBINDINGS = [
     'open-popup', 'run-macro', 'record-toggle', 'capture-step', 'panic-stop',
 ];
+
+/**
+ * How often the running position is written to settings. A loop body with no
+ * waits in it changes step thousands of times a second; the editor only needs to
+ * keep up with the eye.
+ */
+const RUNNING_PUBLISH_MS = 100;
 
 /** Where preferences wants a captured step to land. */
 interface CaptureTarget {
@@ -51,6 +60,10 @@ export default class ClickmateExtension extends Extension {
     private _menuOpen = false;
     private _settingsChangedId = 0;
     private _storeUnsubscribe?: () => void;
+    private _problemsUnsubscribe?: () => void;
+    private _runningPath: RunningStep[] = [];
+    private _publishSourceId = 0;
+    private _publishSerial = 0;
 
     enable(): void {
         this._settings = this.getSettings();
@@ -68,8 +81,11 @@ export default class ClickmateExtension extends Extension {
         this._runner = new MacroRunner(this._daemon, this._evaluator, this._settings, config, {
             onStatus: text => this._onStatus(text),
             onRunningChanged: running => this._onRunningChanged(running),
+            onStepsChanged: path => this._onStepsChanged(path),
             shouldPause: () => this._isPointerOverMenu(),
             onFinished: (reason, error) => {
+                // The runner has already filed the problem; this is only the
+                // interruption, for the case where the menu is closed.
                 if (reason === 'error' && error) {
                     Main.notify('Clickmate', `Macro failed: ${error.message}`);
                 }
@@ -77,10 +93,23 @@ export default class ClickmateExtension extends Extension {
         });
         this._recorder = new Recorder(this._daemon, config, {
             onStatus: text => this._onStatus(text),
-            onError: error => Main.notify('Clickmate', `Recording stopped: ${error.message}`),
+            onError: error => {
+                reportProblem('Recording', `the recording stopped: ${error.message}`, {
+                    hint: 'Anything after this point was not recorded. Check that the clickmate ' +
+                        'service is running: systemctl status clickmate.',
+                    error,
+                });
+                Main.notify('Clickmate', `Recording stopped: ${error.message}`);
+            },
+            onBusyChanged: () => this._updateIcon(),
         });
 
         this._buildIndicator();
+
+        // A problem filed while the menu is shut has to show somewhere, or the
+        // popup only helps people who already suspect something is wrong.
+        this._problemsUnsubscribe = onProblemsChanged(() => this._updateIcon());
+        this._updateIcon();
 
         this._storeUnsubscribe = this._store.onChanged(() => this._popup?.refresh());
         this._settingsChangedId = this._settings.connect('changed', (_settings, key) => {
@@ -100,6 +129,11 @@ export default class ClickmateExtension extends Extension {
 
         this._updateIgnoredRecordingKeys();
         this._popup?.refresh();
+
+        // Asked once at startup rather than only when the menu opens: a daemon
+        // that is not running is the single most common reason for clickmate
+        // doing nothing at all, and the warning icon is what points at it.
+        void this._checkDaemon();
     }
 
     disable(): void {
@@ -107,6 +141,13 @@ export default class ClickmateExtension extends Extension {
             Main.wm.removeKeybinding(name);
         }
         this._boundKeys = [];
+
+        if (this._publishSourceId) {
+            GLib.source_remove(this._publishSourceId);
+            this._publishSourceId = 0;
+        }
+        this._runningPath = [];
+        this._publishRunningPath();
 
         clearMarker();
         this._recorder?.cancel();
@@ -121,6 +162,11 @@ export default class ClickmateExtension extends Extension {
         }
         this._settingsChangedId = 0;
         this._storeUnsubscribe?.();
+        this._problemsUnsubscribe?.();
+        this._problemsUnsubscribe = undefined;
+        // The list belongs to the popup that is going away with us; a locked
+        // screen or a disable/enable cycle should not resurrect old failures.
+        clearProblems();
         this._store?.destroy();
 
         this._runner = undefined;
@@ -200,16 +246,32 @@ export default class ClickmateExtension extends Extension {
         if (!this._icon) {
             return;
         }
-        if (this._recorder?.recording) {
+        const problems = problemCount() > 0;
+        // `busy`, not `recording`: waiting for a single click from the Record
+        // button in preferences is just as much "we are watching your input" as
+        // a whole macro recording, and reads the same way in the panel.
+        if (this._recorder?.busy) {
             this._icon.icon_name = 'media-record-symbolic';
             this._icon.add_style_class_name('clickmate-recording');
         } else if (this._runner?.running) {
             this._icon.icon_name = 'media-playback-start-symbolic';
             this._icon.remove_style_class_name('clickmate-recording');
+        } else if (problems) {
+            // Only when nothing is happening: a running macro reporting a
+            // recoverable failure should still read as running.
+            this._icon.icon_name = 'dialog-warning-symbolic';
+            this._icon.remove_style_class_name('clickmate-recording');
         } else {
             this._icon.icon_name = 'input-mouse-symbolic';
             this._icon.remove_style_class_name('clickmate-recording');
         }
+
+        if (problems) {
+            this._icon.add_style_class_name('clickmate-problem-icon');
+        } else {
+            this._icon.remove_style_class_name('clickmate-problem-icon');
+        }
+        // The popup keeps its own subscription, so the list is already current.
     }
 
     private _onStatus(text: string): void {
@@ -224,6 +286,35 @@ export default class ClickmateExtension extends Extension {
     private _onRunningChanged(running: boolean): void {
         this._updateIcon();
         this._popup?.refresh();
+    }
+
+    /**
+     * Where the runner is, as the chain of steps it is inside. The popup shows it
+     * as a breadcrumb; preferences, which is a different process, reads the ids
+     * off a settings key and highlights the matching rows.
+     */
+    private _onStepsChanged(path: RunningStep[]): void {
+        this._runningPath = path;
+        this._popup?.setDetail(path.map(entry => entry.label).join(' › '));
+
+        if (this._publishSourceId) {
+            return; // a write is already due; it will pick up this path
+        }
+        this._publishSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, RUNNING_PUBLISH_MS, () => {
+            this._publishSourceId = 0;
+            this._publishRunningPath();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    private _publishRunningPath(): void {
+        // The serial is what makes the write differ: the empty path at the end of
+        // one run is the same string as at the end of the last, and GSettings does
+        // not signal an identical value.
+        this._settings?.set_string('running-steps', JSON.stringify({
+            serial: ++this._publishSerial,
+            steps: this._runningPath.map(entry => entry.id),
+        }));
     }
 
     // --- actions -----------------------------------------------------------
@@ -255,21 +346,29 @@ export default class ClickmateExtension extends Extension {
      * the step goes to the end of the selected macro.
      */
     private async _captureStep(target?: CaptureTarget): Promise<{ ok: boolean; message: string }> {
+        // Every failure here is a button press that appeared to do nothing, so
+        // each one is worth a line in the popup as well as the return value.
+        const fail = (message: string, hint?: string) => {
+            reportProblem('Recording', `could not capture a step: ${message}`, { hint });
+            return { ok: false, message };
+        };
+
         if (!this._store || !this._daemon) {
-            return { ok: false, message: 'not ready' };
+            return fail('the extension is not ready yet');
         }
         if (this._recorder?.busy) {
-            return { ok: false, message: this._recorder.recording ? 'stop the recording first' : 'already waiting for a click' };
+            return fail(this._recorder.recording ? 'stop the recording first' : 'already waiting for a click');
         }
 
         const macro = target?.macroId ? this._store.getMacro(target.macroId) : this._store.activeMacro;
         if (!macro) {
-            return { ok: false, message: 'no macro to add to' };
+            return fail('no macro to add to', 'Create one in Settings → Macros first.');
         }
 
         const list = this._targetList(macro, target);
         if (!list) {
-            return { ok: false, message: 'could not find where to add the step' };
+            return fail('could not find where to add the step',
+                'The step you were adding into may have been deleted. Close and reopen Settings.');
         }
 
         this._indicator?.menu.close(true);
@@ -279,11 +378,13 @@ export default class ClickmateExtension extends Extension {
         try {
             step = await this._recorder!.captureOne();
         } catch (error) {
-            return { ok: false, message: (error as Error).message };
+            return fail((error as Error).message,
+                'Check that the clickmate service is running: systemctl status clickmate');
         }
 
         if (!step) {
-            return { ok: false, message: 'nothing captured' };
+            return fail('nothing was captured before it timed out',
+                'Click somewhere, or move the pointer and hold it still, while it waits.');
         }
 
         list.push(step);
@@ -325,11 +426,30 @@ export default class ClickmateExtension extends Extension {
         let request: T;
         try {
             request = JSON.parse(raw) as T;
-        } catch {
-            return;   // malformed; nothing sensible to do
+        } catch (error) {
+            reportProblem('Settings', `a ${name} request from preferences was malformed`, {
+                hint: 'The button that sent it will do nothing until preferences is reopened.',
+                error: error as Error,
+            });
+            return;
         }
 
-        const answer = await handle(request);
+        let answer: object | void;
+        try {
+            answer = await handle(request);
+        } catch (error) {
+            // Preferences is waiting on the reply, so this cannot just throw into
+            // the void: without an answer the button there stays stuck.
+            reportProblem('Settings', `the ${name} request failed: ${(error as Error).message}`, {
+                hint: 'Preferences asked the shell to do something and it did not work. ' +
+                    'Try it again from the preferences window.',
+                error: error as Error,
+            });
+            // Shaped like a handler's own failure answer, so the caller in
+            // preferences shows the reason instead of "unknown reason".
+            answer = { ok: false, message: (error as Error).message };
+        }
+
         if (answer !== undefined) {
             this._settings?.set_string(
                 `${name}-result`,
@@ -362,6 +482,11 @@ export default class ClickmateExtension extends Extension {
                 const warning = `Recorded ${steps.length} step${steps.length === 1 ? '' : 's'}, but ` +
                     `“${macro.name}” never gets past its endless loop. Move them inside it in Settings.`;
                 this._popup?.setDetail(warning);
+                reportProblem('Recording', `${steps.length} recorded step${steps.length === 1 ? '' : 's'} will never run`, {
+                    where: macro.name,
+                    hint: 'They landed after an endless loop. Open Settings → Macros and drag them ' +
+                        'into the loop body.',
+                });
                 Main.notify('Clickmate', warning);
             }
             return;
@@ -380,6 +505,11 @@ export default class ClickmateExtension extends Extension {
             await this._recorder.start(lastPointerEndpoint(macro.body));
             Main.notify('Clickmate', `Recording into “${macro.name}”. Press the shortcut again to stop.`);
         } catch (error) {
+            reportProblem('Recording', `could not start: ${(error as Error).message}`, {
+                hint: 'The daemon has to be running and capturing your devices. ' +
+                    'Check it with: systemctl status clickmate',
+                error: error as Error,
+            });
             Main.notify('Clickmate', `Could not start recording: ${(error as Error).message}`);
         }
         this._updateIcon();
@@ -416,6 +546,9 @@ export default class ClickmateExtension extends Extension {
         if (key === 'macros' || key === 'active-macro-id') {
             this._popup?.refresh();
             return;
+        }
+        if (key === 'running-steps') {
+            return; // our own write, several times a second while a macro runs
         }
         if (key === 'pick-region-request') {
             void this._answerRequest('pick-region', async () => ({ region: await pickRegion() }));
@@ -469,12 +602,21 @@ export default class ClickmateExtension extends Extension {
         try {
             const status = await this._daemon.status();
             if (status.version < 2) {
-                this._popup?.setDetail('The clickmate daemon is out of date — run sudo make install.');
+                reportProblem('Daemon', `it speaks protocol v${status.version}, this extension needs v2`, {
+                    hint: 'Rebuild and reinstall it: cd clickmate && ./deploy.sh',
+                });
             } else if (status.devices.length === 0) {
-                this._popup?.setDetail('The daemon has no capture devices.');
+                reportProblem('Daemon', 'it captured no input devices', {
+                    hint: 'Nothing can be recorded or replayed. The device names in ' +
+                        '/etc/systemd/system/clickmate.service must match this machine — list them with ' +
+                        "grep '^N: Name' /proc/bus/input/devices",
+                });
             }
         } catch (error) {
-            this._popup?.setDetail(`Cannot reach the daemon at ${this._daemon.controlPath}`);
+            reportProblem('Daemon', `cannot reach it at ${this._daemon.controlPath}: ${(error as Error).message}`, {
+                hint: 'Nothing can be recorded or replayed until it answers. ' +
+                    'Check it with: systemctl status clickmate',
+            });
         }
     }
 }

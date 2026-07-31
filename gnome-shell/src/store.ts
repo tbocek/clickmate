@@ -10,6 +10,7 @@ import {
     parseDocument,
     stringifyDocument,
 } from './model.js';
+import { reportProblem } from './problems.js';
 
 export interface Config {
     llmEndpoint: string;
@@ -17,12 +18,10 @@ export interface Config {
     llmApiKey: string;
     llmTimeoutMs: number;
     llmMaxWidth: number;
-    llmJpegQuality: number;
     controlSocket: string;
     eventSocket: string;
     /** 0 means: do not turn idle gaps into wait steps. */
     recordGapMs: number;
-    recordMotion: boolean;
 }
 
 export class MacroStore {
@@ -77,7 +76,9 @@ export class MacroStore {
             try {
                 listener(external);
             } catch (error) {
-                logError(error as Error, 'clickmate: store listener failed');
+                reportProblem('Settings', `a change listener failed: ${(error as Error).message}`, {
+                    error: error as Error,
+                });
             }
         }
     }
@@ -137,11 +138,9 @@ export class MacroStore {
             llmApiKey: s.get_string('llm-api-key'),
             llmTimeoutMs: s.get_int('llm-timeout-ms'),
             llmMaxWidth: s.get_int('llm-max-width'),
-            llmJpegQuality: s.get_int('llm-jpeg-quality'),
             controlSocket: s.get_string('control-socket'),
             eventSocket: s.get_string('event-socket'),
             recordGapMs: s.get_int('record-gap-ms'),
-            recordMotion: s.get_boolean('record-motion'),
         };
     }
 }

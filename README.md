@@ -106,6 +106,15 @@ unplugged device does not stop the rest from being captured.
 a separate mouse are two devices; if the mouse is not listed, the daemon never
 sees it and nothing it does is recorded or observed.
 
+Devices do not have to exist when the daemon starts. `/dev/input` is watched, so
+anything matching is captured when it appears and reattached when it comes back
+after being unplugged. That matters more than it sounds: a wireless mouse often
+pairs a second or two into boot, and a remapper upstream of clickmate rebuilds
+its virtual keyboard every time it is restarted. Both used to leave the daemon
+running against devices that no longer existed, with nothing but a line in the
+journal to say so. `journalctl -u clickmate -f` shows `captured`, `reattached`
+and `detached` as they happen.
+
 The daemon takes an exclusive grab on those devices. The kernel drops a grab when
 the process dies, so a crash self-heals — but while changing the C code, run it
 from an **SSH session or a second TTY** and wrap it in `timeout 60`, so a mistake

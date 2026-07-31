@@ -9,6 +9,7 @@ import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import type { Region } from '../src/model.js';
+import { reportProblem } from '../src/problems.js';
 
 /** How long a Show marker stays on screen. */
 const MARKER_DURATION_MS = 5000;
@@ -29,7 +30,11 @@ export function clearMarker(): void {
         markerTimeoutId = 0;
     }
     for (const actor of markerActors) {
-        Main.layoutManager.removeChrome(actor);
+        // Parent-checked: an actor is tracked from the moment it is built, which
+        // may be before it reached the chrome.
+        if (actor.get_parent()) {
+            Main.layoutManager.removeChrome(actor);
+        }
         actor.destroy();
     }
     markerActors = [];
@@ -74,16 +79,23 @@ export function showMarker(x: number, y: number, w?: number, h?: number, duratio
     const labelY = y + (isRegion ? h! : 24) + 6;
     const fits = labelY < global.stage.height - 30;
 
-    Main.layoutManager.addChrome(container, { affectsInputRegion: false });
-    Main.layoutManager.addChrome(label, { affectsInputRegion: false });
-    label.set_position(Math.round(x), Math.round(fits ? labelY : y - 34));
-
+    // Registered before anything can fail. addChrome parents the actor and only
+    // then validates its options, so a bad call leaves the actor on screen with
+    // nothing tracking it — which is how the marker used to stay until logout.
     markerActors = [container, label];
+    // The expiry is armed first for the same reason: whatever happens below, the
+    // screen goes back to normal on its own.
     markerTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
         markerTimeoutId = 0;   // cleared first: this source is already firing
         clearMarker();
         return GLib.SOURCE_REMOVE;
     });
+
+    // No options: shell 50 dropped `affectsInputRegion` and derives the input
+    // region from reactivity instead, and neither of these actors is reactive.
+    Main.layoutManager.addChrome(container);
+    Main.layoutManager.addChrome(label);
+    label.set_position(Math.round(x), Math.round(fits ? labelY : y - 34));
 }
 
 /**
@@ -121,7 +133,11 @@ export function pickRegion(): Promise<Region | null> {
         try {
             grab = Main.pushModal(overlay, { actionMode: Shell.ActionMode.NORMAL });
         } catch (error) {
-            log(`clickmate: could not grab the screen for region picking: ${(error as Error).message}`);
+            reportProblem('Screen', `could not grab the screen to pick a region: ${(error as Error).message}`, {
+                hint: 'The picker is still on screen, but another window may take your clicks ' +
+                    'instead of it. Press Escape and try again.',
+                error: error as Error,
+            });
         }
 
         let startX = 0;

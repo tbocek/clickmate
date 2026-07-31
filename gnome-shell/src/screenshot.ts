@@ -169,33 +169,24 @@ export interface EncodedImage {
     height: number;
 }
 
-/** Encode as JPEG for the model, falling back to PNG when no JPEG saver exists. */
-export function encodeForLlm(pixbuf: GdkPixbuf.Pixbuf, maxWidth: number, quality: number): EncodedImage {
+/**
+ * Encode as PNG for the model. Lossless matters more here than it looks: a
+ * screenshot is text and thin lines, exactly what JPEG smears, and at this size
+ * PNG is both smaller and quicker to write than JPEG anyway. The compression
+ * level is left at the default — level 9 buys under a percent for twice the
+ * time, and this runs on the compositor thread.
+ */
+export function encodeForLlm(pixbuf: GdkPixbuf.Pixbuf, maxWidth: number): EncodedImage {
     const scaled = scaleToWidth(pixbuf, maxWidth);
 
-    let mimeType = 'image/jpeg';
-    let buffer: Uint8Array | null = null;
-    try {
-        const [ok, data] = scaled.save_to_bufferv('jpeg', ['quality'], [String(quality)]);
-        if (ok && data) {
-            buffer = data;
-        }
-    } catch (error) {
-        log(`clickmate: JPEG encoding unavailable (${(error as Error).message}), falling back to PNG`);
-    }
-
-    if (!buffer) {
-        mimeType = 'image/png';
-        const [ok, data] = scaled.save_to_bufferv('png', [], []);
-        if (!ok || !data) {
-            throw new Error('could not encode the screenshot');
-        }
-        buffer = data;
+    const [ok, buffer] = scaled.save_to_bufferv('png', [], []);
+    if (!ok || !buffer) {
+        throw new Error('could not encode the screenshot');
     }
 
     return {
-        dataUri: `data:${mimeType};base64,${GLib.base64_encode(buffer)}`,
-        mimeType,
+        dataUri: `data:image/png;base64,${GLib.base64_encode(buffer)}`,
+        mimeType: 'image/png',
         byteLength: buffer.length,
         width: scaled.get_width(),
         height: scaled.get_height(),

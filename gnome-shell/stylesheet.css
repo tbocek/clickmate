@@ -11,10 +11,54 @@
 .clickmate-detail {
     font-size: 0.85em;
     color: rgba(255, 255, 255, 0.65);
+    max-width: 30em;
 }
 
 .clickmate-recording {
     color: #e01b24;
+}
+
+/* Panel icon while unread problems are waiting in the popup. */
+.clickmate-problem-icon {
+    color: #f5c211;
+}
+
+/* Problems area */
+
+.clickmate-problems-heading {
+    spacing: 6px;
+    padding-bottom: 4px;
+    margin-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    padding-top: 8px;
+}
+
+.clickmate-problems-icon {
+    color: #f5c211;
+}
+
+.clickmate-problems-title {
+    font-weight: bold;
+    color: #f5c211;
+}
+
+.clickmate-problems {
+    spacing: 8px;
+    max-width: 30em;
+}
+
+.clickmate-problem {
+    spacing: 1px;
+}
+
+.clickmate-problem-message {
+    font-size: 0.9em;
+}
+
+.clickmate-problem-hint {
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.6);
+    padding-left: 10px;
 }
 
 /* Position marker */

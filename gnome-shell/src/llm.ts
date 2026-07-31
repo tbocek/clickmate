@@ -4,6 +4,7 @@
 // Every call is asynchronous. A local vision model can take many seconds to
 // answer and the compositor thread must never wait on it.
 
+import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Soup from 'gi://Soup?version=3.0';
@@ -137,6 +138,61 @@ export function parseVerdict(text: string): { match: boolean; reason: string } |
     }
 
     return null;
+}
+
+// --- connection test -------------------------------------------------------
+
+export interface ConnectionTest {
+    /** The endpoint answered with something we could read a verdict out of. */
+    ok: boolean;
+    /** ...and it got a question about the picture right, so it can see images. */
+    sawImage: boolean;
+    latencyMs: number;
+    /** The model's own words on success, the failure reason otherwise. */
+    message: string;
+}
+
+/**
+ * The picture the test sends: a plain red square, generated rather than stored
+ * so there is no blob to keep in the source. Small enough to be instant, large
+ * enough that servers which reject one-pixel images still take it.
+ */
+function testImage(): EncodedImage {
+    const pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, false, 8, 64, 64);
+    if (!pixbuf) {
+        throw new LlmError('could not build the test picture');
+    }
+    pixbuf.fill(0xff0000ff);   // RGBA, opaque red
+    const [ok, data] = pixbuf.save_to_bufferv('png', [], []);
+    if (!ok || !data) {
+        throw new LlmError('could not encode the test picture');
+    }
+    return {
+        dataUri: `data:image/png;base64,${GLib.base64_encode(data)}`,
+        mimeType: 'image/png',
+        byteLength: data.length,
+        width: 64,
+        height: 64,
+    };
+}
+
+/**
+ * Ask the configured endpoint one question it cannot get wrong. This exercises
+ * the whole path a condition uses — URL, key, model name, image upload, verdict
+ * parsing — so a green result means conditions will work, not merely that
+ * something is listening on the port.
+ */
+export async function testConnection(settings: LlmSettings): Promise<ConnectionTest> {
+    const client = new LlmClient();
+    try {
+        const verdict = await client.ask(
+            'the picture is plain red, with nothing else in it', testImage(), settings);
+        return { ok: true, sawImage: verdict.match, latencyMs: verdict.latencyMs, message: verdict.reason };
+    } catch (error) {
+        return { ok: false, sawImage: false, latencyMs: 0, message: (error as Error).message };
+    } finally {
+        client.destroy();
+    }
 }
 
 export class LlmClient {

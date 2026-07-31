@@ -17,7 +17,6 @@ globalThis.global = { get_pointer: () => [pointer[0], pointer[1], 0] };
 
 const BASE_CONFIG = {
     recordGapMs: 250,
-    recordMotion: true,
 };
 
 const EV_KEY = 1;
@@ -197,13 +196,6 @@ steps = await record([
 ]);
 check('motion then stopping records the move', kinds(steps) === 'move', kinds(steps));
 
-steps = await record([
-    ev(1000, EV_REL, REL_X, 5),
-    ev(1010, EV_KEY, KEY_A, 1),
-    ev(1020, EV_KEY, KEY_A, 0),
-], { recordMotion: false });
-check('motion off records no move', kinds(steps) === 'key', kinds(steps));
-
 // --- continuing from where the macro left off ------------------------------
 
 // Between two recordings the mouse gets used for other things. Coming back to
@@ -290,6 +282,35 @@ check('session shape', kinds(steps) === 'click,wait,key', kinds(steps));
 check('session click position', steps[0].x === 300 && steps[0].y === 400);
 check('session wait', steps[1].ms === 1440, String(steps[1].ms));
 check('session shortcut', steps[2].code === 'KEY_A' && steps[2].mods[0] === 'KEY_LEFTCTRL');
+
+// --- busy notification ------------------------------------------------------
+
+// The panel icon goes red off `busy`, not `recording`, so that waiting for a
+// single click from the Record button looks the same as a whole session.
+{
+    const daemon = { eventPath: '/dev/null', setRecording: async () => {} };
+    const seen = [];
+    const recorder = new Recorder(daemon, { ...BASE_CONFIG }, {
+        onBusyChanged: busy => seen.push(busy),
+    });
+
+    recorder._mode = 'single';
+    check('a single capture counts as busy', recorder.busy === true);
+    check('a single capture is not a recording', recorder.recording === false);
+
+    recorder._endSession();
+    check('ending a single capture reports idle', seen.join(',') === 'false', seen.join(','));
+    check('and the recorder is idle again', recorder.busy === false);
+
+    // A second end must stay quiet, or the icon flickers on every settle.
+    recorder._endSession();
+    check('ending twice notifies once', seen.length === 1, String(seen.length));
+
+    recorder._mode = 'macro';
+    check('a macro session counts as busy', recorder.busy === true && recorder.recording === true);
+    await recorder.stop();
+    check('stopping a macro reports idle', seen.join(',') === 'false,false', seen.join(','));
+}
 
 print(failures === 0 ? '\nALL PASSED' : `\n${failures} FAILURES`);
 if (failures > 0) {

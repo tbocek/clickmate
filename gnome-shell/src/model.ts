@@ -3,6 +3,8 @@
 
 import GLib from 'gi://GLib';
 
+import { reportProblem } from './problems.js';
+
 export const DOCUMENT_VERSION = 1;
 
 // --- conditions ------------------------------------------------------------
@@ -690,7 +692,14 @@ export function parseDocument(json: string): MacroDocument {
         });
         return { version: raw.version ?? DOCUMENT_VERSION, macros };
     } catch (error) {
-        logError(error as Error, 'clickmate: failed to parse macro document');
+        // Returning an empty document rather than throwing keeps the extension
+        // alive, but it also means every macro has just vanished from the UI —
+        // which needs saying out loud, not only in the journal.
+        reportProblem('Macros', `could not read the saved macros: ${(error as Error).message}`, {
+            hint: 'The list will look empty until this is fixed. The stored text is still there: ' +
+                'gsettings get org.gnome.shell.extensions.clickmate macros',
+            error: error as Error,
+        });
         return emptyDocument();
     }
 }
