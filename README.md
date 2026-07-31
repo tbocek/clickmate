@@ -156,6 +156,14 @@ string, `1`/`0`, alternate keys like `answer` or `result`, trailing chatter, and
 a bare YES/NO. If a prompt misbehaves, the popup's status line shows what the
 model actually said.
 
+Reasoning models get `chat_template_kwargs: {enable_thinking: false}`, because a
+model that deliberates over every screenshot answers seconds late — or, once its
+token budget runs out mid-thought, not at all. Templates that do not know the
+field ignore it, and a server that rejects it is retried without it. Thinking
+that arrives anyway is dropped: it is prose full of braces and the words *true*
+and *no*, and reading a verdict out of half a thought would be worse than
+reporting that none was found.
+
 ## Usage
 
 | Shortcut | Action |

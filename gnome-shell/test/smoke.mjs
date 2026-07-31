@@ -6,7 +6,7 @@ import {
 } from '../dist/src/model.js';
 import { textToEvents, keyCode, keyName, charToKey, buttonFromCode } from '../dist/src/keymap.js';
 import { starterMacro } from '../dist/src/starter.js';
-import { parseVerdict } from '../dist/src/llm.js';
+import { parseVerdict, verdictFromObjects } from '../dist/src/llm.js';
 import { isLoopbackEndpoint } from '../dist/src/store.js';
 import {
     reportProblem, listProblems, problemCount, clearProblems, onProblemsChanged,
@@ -253,6 +253,16 @@ check('verdict two objects', parseVerdict('{"match": false, "reason":"a"}\n{"mat
 check('verdict preamble prose', parseVerdict('Sure! Here is the JSON:\n{"match": true, "reason":"green"}').match === true);
 check('verdict unknown keys only', parseVerdict('{"colour":"green"}') === null,
       JSON.stringify(parseVerdict('{"colour":"green"}')));
+// reasoning models: thinking is not the answer
+check('verdict past a think block',
+      parseVerdict('<think>Is it true? No, wait.</think>\n{"match": true, "reason":"red"}').match === true);
+check('verdict think block only', parseVerdict('<think>It looks true to me.</think>') === null);
+check('verdict cut off mid-thought', parseVerdict('<think>The statement seems true, so 1. **D') === null);
+check('verdict braces in a thought are not the answer',
+      parseVerdict('<think>maybe {"match": false}</think>{"match": true}').match === true);
+check('objects-only reads written-out json',
+      verdictFromObjects('I decided. {"match": false, "reason":"grey"}').match === false);
+check('objects-only ignores a stray yes', verdictFromObjects('yes, that is true') === null);
 
 // endpoint check
 check('loopback localhost', isLoopbackEndpoint('http://localhost:11434/v1/chat/completions'));

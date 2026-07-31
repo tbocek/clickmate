@@ -32,8 +32,12 @@ export class LlmError extends Error {}
  * a loose format immediately: they answer in prose, wrap JSON in a code fence,
  * or put the string "yes" where a boolean belongs. Spelling out the exact shape
  * — and what not to do — is worth more here than brevity.
+ *
+ * Exported because preferences shows it verbatim behind an info button. Nobody
+ * can word a prompt well without knowing what it is wrapped in, and a copy of
+ * this text in the help would be wrong within a release.
  */
-function buildInstruction(question: string): string {
+export function buildInstruction(question: string): string {
     return [
         'You are a strict visual classifier. Look at the screenshot and decide whether',
         'the following statement is TRUE or FALSE for what you see.',
@@ -102,15 +106,48 @@ function toBool(value: unknown): boolean | null {
 }
 
 /**
+ * Drop a reasoning model's thinking. Servers usually hand it over in a separate
+ * field, but some leave it inline, and its prose is full of braces and the words
+ * yes and no — everything below would happily read a verdict out of it. An
+ * unclosed tag means the answer was cut off mid-thought: nothing is left.
+ */
+function stripThinking(text: string): string {
+    const without = text.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, '');
+    return without.replace(/<(think|thinking|reasoning)>[\s\S]*$/i, '').trim();
+}
+
+/**
  * Read the model's answer. Even with JSON mode on, small models produce fenced
  * blocks, stringly-typed booleans, alternate key names and trailing chatter, so
  * this accepts all of those before falling back to a plain YES/NO.
  */
 export function parseVerdict(text: string): { match: boolean; reason: string } | null {
-    const trimmed = (text ?? '').trim();
+    const trimmed = stripThinking((text ?? '').trim());
     if (trimmed === '') {
         return null;
     }
+
+    const object = verdictFromObjects(trimmed);
+    if (object) {
+        return object;
+    }
+
+    const word = /\b(yes|no|true|false)\b/i.exec(trimmed);
+    if (word) {
+        const value = word[1].toLowerCase();
+        return { match: value === 'yes' || value === 'true', reason: trimmed.slice(0, 120) };
+    }
+
+    return null;
+}
+
+/**
+ * The strict half of the reading: an actual JSON object, nothing inferred from
+ * prose. Used on its own where a stray "true" in a sentence must not be mistaken
+ * for an answer.
+ */
+export function verdictFromObjects(text: string): { match: boolean; reason: string } | null {
+    const trimmed = stripThinking((text ?? '').trim());
 
     // Non-greedy from the first brace: models sometimes emit a second object
     // after the first, and JSON.parse would choke on the pair.
@@ -129,12 +166,6 @@ export function parseVerdict(text: string): { match: boolean; reason: string } |
         } catch {
             // Try the next object, then fall through to the plain-text reading.
         }
-    }
-
-    const word = /\b(yes|no|true|false)\b/i.exec(trimmed);
-    if (word) {
-        const value = word[1].toLowerCase();
-        return { match: value === 'yes' || value === 'true', reason: trimmed.slice(0, 120) };
     }
 
     return null;
@@ -195,9 +226,18 @@ export async function testConnection(settings: LlmSettings): Promise<ConnectionT
     }
 }
 
+/**
+ * Room for the answer. The answer itself is a dozen tokens; the rest is headroom
+ * for a reasoning model that thinks anyway, despite being asked not to. Getting
+ * this wrong is not a bad answer but no answer at all: the budget runs out
+ * mid-thought and the reply comes back empty.
+ */
+const MAX_TOKENS = 400;
+
 export class LlmClient {
     private _session: Soup.Session;
     private _jsonMode = true;
+    private _noThinking = true;
 
     constructor() {
         ensurePromisified();
@@ -216,7 +256,7 @@ export class LlmClient {
         const body: Record<string, unknown> = {
             model: settings.model,
             temperature: 0,
-            max_tokens: 96,
+            max_tokens: MAX_TOKENS,
             messages: [
                 {
                     role: 'user',
@@ -233,6 +273,14 @@ export class LlmClient {
         // reject the request, so we remember that and stop sending it.
         if (this._jsonMode) {
             body.response_format = { type: 'json_object' };
+        }
+
+        // A reasoning model spends its whole budget deliberating over a picture
+        // it recognises at a glance, and the answer arrives seconds late or not
+        // at all. This is the switch that turns thinking off; templates that
+        // have never heard of it ignore it.
+        if (this._noThinking) {
+            body.chat_template_kwargs = { enable_thinking: false };
         }
 
         const message = Soup.Message.new('POST', settings.endpoint);
@@ -267,7 +315,15 @@ export class LlmClient {
             const text = new TextDecoder().decode(bytes.get_data() ?? new Uint8Array(0));
 
             if (status !== Soup.Status.OK) {
-                if (this._jsonMode && status === 400) {
+                // A rejected request may be about either extra field, and there
+                // is no telling which from the status alone. Give up the one we
+                // can most afford to lose first, and try again.
+                if (status === 400 && this._noThinking) {
+                    log('clickmate: endpoint rejected chat_template_kwargs, retrying without it');
+                    this._noThinking = false;
+                    return this.ask(prompt, image, settings);
+                }
+                if (status === 400 && this._jsonMode) {
                     log('clickmate: endpoint rejected response_format, retrying without JSON mode');
                     this._jsonMode = false;
                     return this.ask(prompt, image, settings);
@@ -276,15 +332,22 @@ export class LlmClient {
             }
 
             let content = '';
+            let reasoning = '';
+            let finish = '';
             try {
                 const json = JSON.parse(text) as {
-                    choices?: { message?: { content?: unknown } }[];
+                    choices?: {
+                        finish_reason?: string;
+                        message?: { content?: unknown; reasoning_content?: unknown };
+                    }[];
                     error?: { message?: string };
                 };
                 if (json.error?.message) {
                     throw new LlmError(json.error.message);
                 }
-                const raw = json.choices?.[0]?.message?.content;
+                const choice = json.choices?.[0];
+                finish = choice?.finish_reason ?? '';
+                const raw = choice?.message?.content;
                 if (typeof raw === 'string') {
                     content = raw;
                 } else if (Array.isArray(raw)) {
@@ -293,6 +356,9 @@ export class LlmClient {
                         .map(part => (typeof part === 'string' ? part : (part as { text?: string })?.text ?? ''))
                         .join(' ');
                 }
+                if (typeof choice?.message?.reasoning_content === 'string') {
+                    reasoning = choice.message.reasoning_content;
+                }
             } catch (error) {
                 if (error instanceof LlmError) {
                     throw error;
@@ -300,8 +366,20 @@ export class LlmClient {
                 throw new LlmError(`could not parse the response: ${text.slice(0, 200)}`);
             }
 
-            const parsed = parseVerdict(content);
+            // A reasoning model that would not be talked out of thinking
+            // sometimes finishes the job inside its thoughts. Only a written-out
+            // JSON object counts there: half a thought is full of the words true
+            // and no, and reading a verdict out of one would be worse than
+            // saying we could not find it.
+            const parsed = parseVerdict(content) ?? verdictFromObjects(reasoning);
             if (!parsed) {
+                // Naming the empty case separately: an error that ends in a
+                // colon and then nothing reads like the message itself broke.
+                if (content.trim() === '') {
+                    throw new LlmError(reasoning.trim() !== '' || finish === 'length'
+                        ? 'the model spent its whole answer thinking and never got to the verdict'
+                        : 'the model returned an empty answer');
+                }
                 throw new LlmError(`could not read a yes/no answer from: ${content.slice(0, 200)}`);
             }
 

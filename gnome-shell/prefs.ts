@@ -36,7 +36,7 @@ import {
     stringifyDocument,
 } from './src/model.js';
 import { MacroStore } from './src/store.js';
-import { testConnection } from './src/llm.js';
+import { buildInstruction, testConnection } from './src/llm.js';
 
 const CONDITION_TYPES: ConditionType[] = ['always', 'llm', 'color', 'and', 'or', 'not'];
 
@@ -260,13 +260,13 @@ function iconButton(iconName: string, tooltip: string, onClick: () => void): Gtk
  * A ⓘ that opens a popover. For guidance too long for a subtitle and too small
  * for documentation nobody opens, kept next to the field it is about.
  */
-function infoButton(tooltip: string, markup: string): Gtk.MenuButton {
+function infoButton(tooltip: string, markup: string, width = 46): Gtk.MenuButton {
     const label = new Gtk.Label({
         label: markup,
         use_markup: true,
         wrap: true,
         xalign: 0,
-        max_width_chars: 46,
+        max_width_chars: width,
         margin_top: 12,
         margin_bottom: 12,
         margin_start: 12,
@@ -301,6 +301,22 @@ const PROMPT_HELP = [
     '',
     'A tight <b>Screen area</b> helps more than any wording.',
 ].join('\n');
+
+/**
+ * The wrapper, shown word for word. Built from the real thing rather than
+ * described, so it cannot quietly stop being true; the placeholder stands in for
+ * whatever is typed in the field.
+ */
+function sentPromptHelp(): string {
+    const instruction = buildInstruction(_('…your words go here…'));
+    return [
+        _('<b>Your words are not sent on their own.</b>'),
+        '',
+        _('Every check sends the screenshot together with this, your text on the STATEMENT line — which is why a statement works and a question does not:'),
+        '',
+        `<tt>${GLib.markup_escape_text(instruction, -1)}</tt>`,
+    ].join('\n');
+}
 
 /** What highlighting a running step needs to get at, per step id. */
 interface StepRow {
@@ -1119,6 +1135,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     condition.prompt = text;
                     save();
                 });
+                promptRow.add_suffix(infoButton(_('What is actually sent'), sentPromptHelp(), 64));
                 promptRow.add_suffix(infoButton(_('How to word this'), PROMPT_HELP));
                 rows.push(promptRow);
                 rows.push(comboRow(_('Proceed when the answer is'), ['yes', 'no'] as const,
