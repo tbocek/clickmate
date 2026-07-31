@@ -61,11 +61,12 @@ export interface RunnerCallbacks {
      */
     shouldPause?: () => boolean;
     /**
-     * Start or stop another macro, for the steps that do that. Returns a reason
-     * when it could not, which fails the step: a macro that was renamed out of
+     * Start or stop another macro, for the steps that do that. `at` is the step
+     * a start should begin from, empty for the top. Returns a reason when it
+     * could not, which fails the step: a macro that was renamed out of
      * existence must not leave the rest of the run quietly going.
      */
-    onMacroControl?: (action: 'start' | 'stop', macroId: string) => string | null;
+    onMacroControl?: (action: 'start' | 'stop', macroId: string, at?: string) => string | null;
     /** Names a macro for `describeStep`, so those steps read as what they poke. */
     macroName?: (macroId: string) => string | undefined;
 }
@@ -446,8 +447,9 @@ export class MacroRunner {
 
             case 'start':
                 // Including ourselves — the shell ends this run and begins the
-                // macro again from the top, so nothing after this step runs.
-                this._control('start', step.macro || this._macroId);
+                // macro again, from the named step or the top, so nothing after
+                // this step runs.
+                this._control('start', step.macro || this._macroId, step.at ?? '');
                 return 'normal';
         }
     }
@@ -457,8 +459,8 @@ export class MacroRunner {
      * each other — one macro to a runner — so this goes out to whoever is
      * holding them, and comes back with what to say if it could not be done.
      */
-    private _control(action: 'start' | 'stop', macroId: string): void {
-        const problem = this._callbacks.onMacroControl?.(action, macroId);
+    private _control(action: 'start' | 'stop', macroId: string, at = ''): void {
+        const problem = this._callbacks.onMacroControl?.(action, macroId, at);
         if (problem) {
             throw new Error(problem);
         }

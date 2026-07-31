@@ -59,11 +59,12 @@ export default class ClickmateExtension extends Extension {
      */
     private _runners = new Map<string, MacroRunner>();
     /**
-     * Macros a `start` step asked for while they were already running. A run
-     * cannot begin before the last one has unwound, so the id waits here until
+     * Macros a `start` step asked for while they were already running, mapped
+     * to the step the new run should begin at ('' for the top). A run cannot
+     * begin before the last one has unwound, so the entry waits here until
      * that run reports itself finished.
      */
-    private _restarting = new Set<string>();
+    private _restarting = new Map<string, string>();
     private _recorder?: Recorder;
     private _popup?: MacroPopup;
     private _indicator?: PanelMenu.Button;
@@ -378,7 +379,7 @@ export default class ClickmateExtension extends Extension {
                 onStepsChanged: path => this._onStepsChanged(macroId, path),
                 shouldPause: () => this._isPointerOverMenu(),
                 onFinished: (reason, error) => this._onFinished(macroId, reason, error),
-                onMacroControl: (action, target) => this._macroControl(action, target),
+                onMacroControl: (action, target, at) => this._macroControl(action, target, at ?? ''),
                 macroName: id => this._store?.getMacro(id)?.name,
             });
         this._runners.set(macroId, runner);
@@ -408,8 +409,9 @@ export default class ClickmateExtension extends Extension {
         // A start step asked for a macro that was already running: it had to end
         // before it could begin again, and it has just ended. `_running` is
         // already false by the time we are called, so this starts cleanly.
+        const restartAt = this._restarting.get(macroId);
         if (this._restarting.delete(macroId) && macro) {
-            void this._runners.get(macroId)?.run(macro, '');
+            void this._runners.get(macroId)?.run(macro, restartAt ?? '');
         }
 
         // The runner has already filed the problem; this is only the
@@ -469,12 +471,13 @@ export default class ClickmateExtension extends Extension {
      * A `start` or `stop` step reaching into another macro. Returns a reason
      * when it could not, which the runner turns into a failed step.
      *
-     * Start means start: a macro already going is ended and begun again from the
-     * top, because there is one run per macro and asking for it while it runs
-     * can only mean from the beginning. That includes a macro restarting itself,
-     * which is how a watcher gets back to its first check.
+     * Start means start: a macro already going is ended and begun again — at
+     * `at` when the step names one, from the top otherwise — because there is
+     * one run per macro and asking for it while it runs can only mean over
+     * again. That includes a macro restarting itself, which is how a watcher
+     * gets back to its first check, and with `at` how a run jumps to a step.
      */
-    private _macroControl(action: 'start' | 'stop', macroId: string): string | null {
+    private _macroControl(action: 'start' | 'stop', macroId: string, at = ''): string | null {
         const macro = this._store?.getMacro(macroId);
         if (!macro) {
             return 'that macro is no longer there';
@@ -488,11 +491,11 @@ export default class ClickmateExtension extends Extension {
             // is global, and would cut into whatever else is playing.
             const alone = this._runningMacros().length === 1;
             if (action === 'start') {
-                this._restarting.add(macroId);
+                this._restarting.set(macroId, at);
             }
             runner.stop(alone);
         } else if (action === 'start') {
-            void runner.run(macro, '');
+            void runner.run(macro, at);
         }
         this._popup?.refresh();
         return null;

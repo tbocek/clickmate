@@ -172,6 +172,14 @@ export type FlowStep = StepCommon & {
 export type MacroStep = StepCommon & {
     kind: 'start' | 'stop';
     macro?: string;
+    /**
+     * For `start`: the step to begin at, empty for the top. Starting always
+     * ends the run already going first, so a start pointing into its own macro
+     * is a jump — stop whatever this run is on, continue from the named step.
+     * A step that has since been deleted falls back to the top, the same
+     * bargain as `resolveRunStart`: a stale reference costs a move, not a run.
+     */
+    at?: string;
 };
 
 export type Step =
@@ -958,8 +966,16 @@ function formatMs(ms: number): string {
  * `macroName` resolves the macro a `start` or `stop` step points at. Without it
  * those read as "another macro": the runner has no document to look in, and its
  * breadcrumb is about where the run is, not which macro it just poked.
+ *
+ * `stepLabel` does the same for the step a `start` points at — ids are unique
+ * across the whole document, so it takes only the id. Without it the title
+ * says "a chosen step" rather than which one.
  */
-export function describeStep(step: Step, macroName?: (id: string) => string | undefined): string {
+export function describeStep(
+    step: Step,
+    macroName?: (id: string) => string | undefined,
+    stepLabel?: (stepId: string) => string | undefined,
+): string {
     switch (step.kind) {
         case 'click':
             return step.mode === 'abs'
@@ -995,11 +1011,16 @@ export function describeStep(step: Step, macroName?: (id: string) => string | un
         case 'start':
         case 'stop': {
             const verb = step.kind === 'start' ? 'Start' : 'Stop';
+            const at = step.kind === 'start' && step.at
+                ? ` at ${stepLabel?.(step.at) ?? 'a chosen step'}`
+                : '';
             if (!step.macro) {
-                return step.kind === 'start' ? 'Start this macro again' : 'Stop the macro';
+                return step.kind === 'start'
+                    ? (at ? `Start again${at}` : 'Start this macro again')
+                    : 'Stop the macro';
             }
             const name = macroName?.(step.macro);
-            return name ? `${verb} “${name}”` : `${verb} another macro`;
+            return (name ? `${verb} “${name}”` : `${verb} another macro`) + at;
         }
     }
 }

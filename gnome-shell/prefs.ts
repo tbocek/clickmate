@@ -24,6 +24,7 @@ import {
     describeCondition,
     describeStep,
     emptyDocument,
+    findStep,
     macroEnabled,
     moveStepNested,
     newCondition,
@@ -33,6 +34,7 @@ import {
     parseNumbers,
     removeStep,
     stringifyDocument,
+    walk,
 } from './src/model.js';
 import { MacroStore } from './src/store.js';
 import { buildInstruction, testConnection } from './src/llm.js';
@@ -260,11 +262,12 @@ function comboRow<T extends string>(
         selected: Math.max(0, options.indexOf(selected)),
     });
     // Tracked rather than compared against the initial value, so picking A, B, A
-    // still reports the last change.
+    // still reports the last change. The empty string is a real choice — "this
+    // macro", "from the top" — so only out-of-range reads are dropped.
     let current = selected;
     row.connect('notify::selected', () => {
         const value = options[row.get_selected()];
-        if (value && value !== current) {
+        if (value !== undefined && value !== current) {
             current = value;
             onChange(value);
         }
@@ -1133,10 +1136,21 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     /**
      * A step's title. Steps that name another macro say its name rather than
-     * its id, so a renamed macro reads correctly everywhere it is referred to.
+     * its id, so a renamed macro reads correctly everywhere it is referred to —
+     * and likewise for the step a start begins at. Ids are unique across the
+     * document, so the step is looked for in every macro rather than threading
+     * through which one the caller is editing.
      */
     private _describe(step: Step): string {
-        return describeStep(step, id => this._store.getMacro(id)?.name);
+        return describeStep(step, id => this._store.getMacro(id)?.name, stepId => {
+            for (const macro of this._store.macros) {
+                const loc = findStep(macro.body, stepId);
+                if (loc) {
+                    return describeStep(loc.step, id => this._store.getMacro(id)?.name);
+                }
+            }
+            return undefined;
+        });
     }
 
     /**
@@ -1532,17 +1546,51 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     step.macro = '';
                 }
                 const options = ['', ...others.map(other => other.id)];
+                // "From the top" used to live in this label; the At step row
+                // says it now, and can say otherwise.
                 const labels: Record<string, string> = {
-                    '': step.kind === 'start' ? _('This macro, from the top') : _('This macro'),
+                    '': _('This macro'),
                 };
                 for (const other of others) {
                     labels[other.id] = other.name;
                 }
                 rows.push(comboRow(_('Which macro'), options, labels, step.macro ?? '', value => {
                     step.macro = value;
+                    // Whatever step was chosen belonged to the previous macro.
+                    step.at = '';
                     // The title says which macro, so it has to be redrawn.
                     rebuild();
                 }));
+
+                if (step.kind === 'start') {
+                    // The steps of whichever macro is being started, indented
+                    // the way the editor nests them, so the list reads as the
+                    // macro does.
+                    const target = step.macro
+                        ? others.find(other => other.id === step.macro)
+                        : macro;
+                    const stepIds = [''];
+                    const stepLabels: Record<string, string> = { '': _('From the top') };
+                    walk(target?.body ?? [], loc => {
+                        // Not this step itself: starting at it would only run it
+                        // again, and again.
+                        if (loc.step.id === step.id) {
+                            return;
+                        }
+                        stepIds.push(loc.step.id);
+                        stepLabels[loc.step.id] = `${'    '.repeat(loc.depth)}${this._describe(loc.step)}`;
+                    });
+                    // A step that has since been deleted is not a choice any
+                    // more; the top is the fallback the runner uses anyway.
+                    if (step.at && !stepIds.includes(step.at)) {
+                        step.at = '';
+                    }
+                    rows.push(comboRow(_('At step'), stepIds, stepLabels, step.at ?? '', value => {
+                        step.at = value;
+                        // The title names the step, so it has to be redrawn.
+                        rebuild();
+                    }));
+                }
                 break;
             }
 
@@ -1550,7 +1598,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 break;
         }
 
-        void macro;
         return rows;
     }
 

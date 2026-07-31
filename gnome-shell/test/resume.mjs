@@ -243,8 +243,8 @@ check('pathToStep of a missing step is empty', pathToStep(flat.body, 'gone').len
     // The runner knows about one macro: its own. Steps that name another one
     // hand the name back to whoever owns the rest of them.
     const asked = [];
-    const control = (action, macroId) => {
-        asked.push(`${action}:${macroId}`);
+    const control = (action, macroId, at) => {
+        asked.push(`${action}:${macroId}${at ? `@${at}` : ''}`);
         return macroId === 'gone' ? 'that macro is no longer there' : null;
     };
     const runWith = async body => {
@@ -286,6 +286,15 @@ check('pathToStep of a missing step is empty', pathToStep(flat.body, 'gone').len
     await runWith([newStep('start')]);
     check('a start with no macro named restarts this one',
           asked.join(' ') === 'start:self', asked.join(' '));
+
+    // A start step naming a step is a jump: the shell ends the run and begins
+    // it again at that step, so the id has to arrive with the request.
+    asked.length = 0;
+    const jump = newStep('start');
+    jump.at = 'landing';
+    await runWith([jump]);
+    check('a start step passes the step to begin at through the callback',
+          asked.join(' ') === 'start:self@landing', asked.join(' '));
 
     const missing = newStep('stop');
     missing.macro = 'gone';
