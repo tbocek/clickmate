@@ -4,6 +4,7 @@
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import type Clutter from 'gi://Clutter';
 
 import { ConditionEvaluator } from './conditions.js';
 import { DaemonClient, type Playback } from './daemon.js';
@@ -69,8 +70,11 @@ export interface RunnerCallbacks {
     macroName?: (macroId: string) => string | undefined;
 }
 
-// Without a flattened acceleration curve a move may need a few more passes;
-// each is one daemon round trip, so a higher ceiling is cheap.
+// A warp lands exactly, so a couple of passes only cover the pointer being
+// moved between warp and measure — by a hand on the mouse, mostly.
+const MAX_WARP_ITERATIONS = 3;
+// The relative fallback fights the acceleration curve, so a move may need a
+// few more passes; each is one daemon round trip, so a higher ceiling is cheap.
 const MAX_MOVE_ITERATIONS = 12;
 const PAUSE_POLL_MS = 120;
 
@@ -521,17 +525,35 @@ export class MacroRunner {
     }
 
     /**
-     * uinput only speaks relative motion, so walk the pointer to the target and
-     * verify with global.get_pointer() after each nudge. Converges whatever the
-     * acceleration curve does to a raw delta.
+     * Put the pointer on (x, y) in one motion. The compositor's own seat can
+     * warp it there — one call, exact position, no acceleration curve in the
+     * way — so that is the primary path, and the move is atomic within the
+     * step rather than a visible glide.
      *
-     * Every pass measures the pointer, so nothing else may move it in between:
-     * the caller holds the daemon for the whole walk and this plays through that
-     * lease. The pointer is still shared with the person at the desk — a hand on
-     * the mouse mid-walk is answered by the next pass, which reads where it
-     * really is rather than where the last nudge aimed.
+     * A target that grabs or confines the pointer can swallow the warp. Those
+     * grabs still honour relative motion, so the old walk — nudge over uinput,
+     * measure, nudge again — stays as the fallback. Every pass measures the
+     * pointer, so nothing else may move it in between: the caller holds the
+     * daemon for the whole move and the fallback plays through that lease. The
+     * pointer is still shared with the person at the desk — a hand on the
+     * mouse is answered by the next pass, which reads where it really is.
      */
     private async _moveAbs(x: number, y: number, via?: Playback): Promise<void> {
+        const seat = await this._defaultSeat();
+        for (let i = 0; seat && i < MAX_WARP_ITERATIONS; i++) {
+            if (this._cancelled) {
+                return;
+            }
+            seat.warp_pointer(x, y);
+            // The warp is applied on the input thread, not inside the call:
+            // measuring straight away would read the old position back.
+            await this._sleep(2);
+            const [px, py] = global.get_pointer();
+            if (Math.abs(x - px) <= 1 && Math.abs(y - py) <= 1) {
+                return;
+            }
+        }
+
         for (let i = 0; i < MAX_MOVE_ITERATIONS; i++) {
             if (this._cancelled) {
                 return;
@@ -621,6 +643,26 @@ export class MacroRunner {
     }
 
     // --- helpers -----------------------------------------------------------
+
+    /** See `_defaultSeat`. `undefined` means not asked yet. */
+    private static _seat: Clutter.Seat | null | undefined;
+
+    /**
+     * The compositor's seat, or null where there is none to be had — the tests
+     * drive this file under plain gjs, which has no Clutter to import. Loaded
+     * lazily for the same reason: a static import would fail there on load.
+     */
+    private async _defaultSeat(): Promise<Clutter.Seat | null> {
+        if (MacroRunner._seat === undefined) {
+            try {
+                const { default: Clutter } = await import('gi://Clutter');
+                MacroRunner._seat = Clutter.get_default_backend().get_default_seat();
+            } catch {
+                MacroRunner._seat = null;
+            }
+        }
+        return MacroRunner._seat;
+    }
 
     private _status(text: string): void {
         this._callbacks.onStatus?.(text);
