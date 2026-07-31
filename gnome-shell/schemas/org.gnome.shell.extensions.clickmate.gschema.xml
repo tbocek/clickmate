@@ -26,25 +26,17 @@
             <description>Internal: JSON list of the step ids the runner is currently inside</description>
         </key>
 
-        <!-- Where the next run starts. Set by pausing, by the failing step when a
-             run stops on an error, or by hand in the editor; cleared by Stop and
-             by a run that reaches the end. Empty means start at the top. Shared
-             between the two processes because the editor is what shows it and
-             the shell is what acts on it. -->
-        <key name="resume-step" type="s">
-            <default>''</default>
-            <summary>Step to continue from</summary>
-            <description>Id of the step the next run starts at, or empty to start at the beginning</description>
-        </key>
-
-        <!-- The row selected in the editor, which is where a recording lands:
-             "after:abc123" for right behind a step, "in:abc123:body" for the end
-             of one of its bodies, empty for the end of the macro. The editor
-             picks it, the shell obeys it, and it survives a rebuild of the
-             editor because it lives out here rather than in a widget. -->
+        <!-- The row selected in the editor: "after:abc123" for a step,
+             "in:abc123:body" for one of its bodies, empty for the end of the
+             macro. It is where a recording lands, and — for a step — where the
+             next run starts, so there is one mark for "here" rather than two.
+             The shell writes it too: pausing marks the step it stopped on, a
+             failure marks the step that threw, and a run that reaches the end
+             clears it. It lives out here rather than in a widget so it survives
+             a rebuild of the editor, and so both processes can see it. -->
         <key name="record-into" type="s">
             <default>''</default>
-            <summary>Where recorded steps go</summary>
+            <summary>The selected row</summary>
             <description>The selected row, as "after:stepId" or "in:stepId:branch", or empty for the end of the macro</description>
         </key>
 

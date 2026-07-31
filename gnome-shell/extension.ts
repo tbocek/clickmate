@@ -21,7 +21,7 @@ import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
 import {
     childLists, describeStep, findStep, lastPointerEndpoint, reachesEnd, resolveRecordTarget,
-    type Macro, type RecordTarget, type Step,
+    resolveRunStart, type Macro, type RecordTarget, type Step,
 } from './src/model.js';
 import { clearProblems, onProblemsChanged, problemCount, reportProblem } from './src/problems.js';
 import { MacroPopup } from './ui/popup.js';
@@ -386,16 +386,33 @@ export default class ClickmateExtension extends Extension {
         this._popup?.refresh();
     }
 
-    /** Id of the step the next run starts at; '' means from the beginning. */
+    /**
+     * Id of the step the next run starts at; '' means from the beginning. It is
+     * the row selected in the editor, which is also where a recording lands —
+     * one mark for "here", used by both.
+     */
     private get _resumeStep(): string {
-        return this._settings?.get_string('resume-step') ?? '';
+        const macro = this._store?.activeMacro;
+        return macro
+            ? resolveRunStart(macro.body, this._settings?.get_string('record-into') ?? '')
+            : '';
     }
 
     private set _resumeStep(id: string) {
+        if (!this._settings) {
+            return;
+        }
+        const current = this._settings.get_string('record-into');
+        if (!id && !current.startsWith('after:')) {
+            // Nothing to forget: a body picked for recording is not somewhere a
+            // run was left off, and clearing it would move that choice.
+            return;
+        }
+        const value = id ? `after:${id}` : '';
         // Guarded because preferences redraws on every change of this key, and
         // most writes here are the same value it already holds.
-        if (this._settings && this._settings.get_string('resume-step') !== id) {
-            this._settings.set_string('resume-step', id);
+        if (current !== value) {
+            this._settings.set_string('record-into', value);
         }
     }
 
@@ -651,13 +668,14 @@ export default class ClickmateExtension extends Extension {
         if (key === 'running-steps') {
             return; // our own write, several times a second while a macro runs
         }
-        if (key === 'resume-step') {
-            // Preferences can set it too, by marking a step to continue from.
+        if (key === 'record-into') {
+            // The selected row is also where the next run starts, and the popup
+            // says so — "Continue" rather than "Run".
             this._popup?.refresh();
             return;
         }
-        if (key === 'record-into' || key === 'recording') {
-            return; // the editor's choice and our own state; nothing to redo here
+        if (key === 'recording') {
+            return; // our own state; nothing to redo here
         }
         if (key === 'pick-region-request') {
             void this._answerRequest('pick-region', async () => ({ region: await pickRegion() }));

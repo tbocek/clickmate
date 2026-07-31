@@ -2,6 +2,7 @@ import {
     parseDocument, stringifyDocument, newStep, describeStep, describeCondition,
     insertStep, moveStep, moveStepNested, parentOf, removeStep, cloneStep, walk, findStep, newMacro,
     resolveRecordTarget,
+    resolveRunStart,
     STEP_KIND_LABELS, parseNumbers, reachesEnd, lastPointerEndpoint,
     AUTHORABLE_STEP_KINDS,
 } from '../dist/src/model.js';
@@ -140,6 +141,19 @@ const open = () => true;
           resolveRecordTarget(m.body, 'after:gone').at === m.body.length);
     check('so does a target from an older version',
           resolveRecordTarget(m.body, `${loop.id}:body`).where === '');
+
+    // The same selection says where a run starts, so that there is one mark
+    // for "here" rather than a second button meaning almost the same thing.
+    check('a selected step is where the next run starts',
+          resolveRunStart(m.body, `after:${first.id}`) === first.id);
+    check('a step inside a body counts too',
+          resolveRunStart(m.body, `after:${inside.id}`) === inside.id);
+    check('a selected body starts at the top',
+          resolveRunStart(m.body, `in:${loop.id}:body`) === '');
+    check('so does no selection at all',
+          resolveRunStart(m.body, '') === '');
+    check('and so does a step that has been deleted since',
+          resolveRunStart(m.body, 'after:gone') === '');
 }
 
 // round trip

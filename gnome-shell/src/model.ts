@@ -374,6 +374,20 @@ export function resolveRecordTarget(body: Step[], raw: string): RecordTarget {
         : end;
 }
 
+/**
+ * Where a run starts, read from the same selected row. A step selected is a
+ * step to begin at — the editor has no separate "continue from here" mark, and
+ * two marks meaning almost the same thing was one too many. A body, or nothing,
+ * or a step that has since gone: from the top.
+ */
+export function resolveRunStart(body: Step[], raw: string): string {
+    const [what, stepId] = raw.split(':');
+    if (what !== 'after' || !stepId) {
+        return '';
+    }
+    return findStep(body, stepId) ? stepId : '';
+}
+
 export function removeStep(list: Step[], id: string): Step | null {
     const loc = findStep(list, id);
     if (!loc) {

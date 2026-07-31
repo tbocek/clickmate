@@ -136,8 +136,10 @@ export class MacroPopup {
         const running = this._deps.isRunning();
         const macro = this._deps.store.activeMacro;
 
-        // Where the next run would pick up. Only meaningful for the macro that
-        // holds the step: a point left over from another one reads as idle.
+        // Where the next run would pick up: the row selected in the editor,
+        // which a pause and a failure also write. Only meaningful for the macro
+        // that holds the step — a point left over from another one reads as
+        // idle.
         const resumeId = this._deps.resumeStep();
         const resumeAt = macro && resumeId ? findStep(macro.body, resumeId)?.step : undefined;
 
@@ -158,7 +160,7 @@ export class MacroPopup {
         } else if (!macro) {
             this._statusLabel.text = 'No macro selected';
         } else if (resumeAt) {
-            this._statusLabel.text = `Paused at ${describeStep(resumeAt)}`;
+            this._statusLabel.text = `Continues at ${describeStep(resumeAt)}`;
         } else {
             this._statusLabel.text = `Idle — “${macro.name}” selected`;
         }

@@ -38,10 +38,11 @@ repeat forever:
   bisect a macro instead of deleting from it, and JSON import/export.
 - **A panel popup that stays out of the way** — a switch, a stop, what is
   running, and a way into the settings.
-- **Pause and continue** — halting a run remembers the step it was on, and you
-  can mark any step in the editor as where the next run starts.
+- **Pause and continue** — halting a run remembers the step it was on, and
+  selecting a step is what says where the next run starts.
 - **Record straight into a loop body** — click the row a recording should land
-  on, and watch it go red while the recording runs.
+  on, and watch it go red while the recording runs. The same selection is where
+  a run continues from: one mark for “here”.
 - **Emergency stop** that aborts mid-macro and releases every held key.
 
 ## How it fits together
@@ -191,11 +192,13 @@ switch reads **Continue** and the next press picks up there rather than at the
 top. **Stop** in the popup, and the emergency shortcut, throw that place away:
 after either of them the macro starts from the beginning again.
 
-You can also choose the step yourself. Every step in the editor has a
-*jump* button that marks it as where the next run starts; the marked step is
-tinted, and only one step can hold the mark at a time. A run that fails marks
-the step that failed, so you can fix it and press the shortcut again instead of
-replaying everything before it.
+You can also choose the step yourself: select it. The selected row is the one
+mark the editor has — a recording lands there, and a run starts there — so
+picking up in the middle of a macro is the same gesture as recording into the
+middle of one. Only a step counts for running; selecting a body, or nothing,
+starts at the top. A run that fails selects the step that failed, so you can fix
+it and press the shortcut again instead of replaying everything before it, and a
+run that reaches the end clears the selection again.
 
 The mark is taken at face value: continuing into the `then` or `else` of a
 condition runs that branch without asking the condition again, since asking
@@ -240,7 +243,10 @@ window drops out of the way, the step runs, and the window comes back. It is the
 quickest way to check that a click really lands where you meant it to, without
 running the macro around it. Steps that only mean something inside a run do not
 get one — a loop or an `if` would take its whole body along, and an endless loop
-would take the session with it from a window that has no Stop.
+would take the session with it from a window that has no Stop. A step that ran
+becomes the selected row, so the insertion point walks down the macro with you:
+whatever you record next carries on from where you got to, rather than from
+wherever the selection started out.
 
 **Move up** and **Move down** treat the editor as what you see. A folded loop is
 one card, so a step passes it in a single press; an open one is a place with an

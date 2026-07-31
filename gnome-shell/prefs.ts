@@ -21,11 +21,9 @@ import {
     type Step,
     type StepKind,
     childLists,
-    cloneStep,
     describeCondition,
     describeStep,
     emptyDocument,
-    insertStep,
     moveStepNested,
     newCondition,
     newMacro,
@@ -50,7 +48,7 @@ const SETTINGS_FILE = 'clickmate-settings.json';
  * clobber the other export or replay a stale request.
  */
 const NOT_SETTINGS = [
-    'macros', 'active-macro-id', 'running-steps', 'resume-step', 'record-into', 'recording',
+    'macros', 'active-macro-id', 'running-steps', 'record-into', 'recording',
 ];
 
 function isTransferableKey(key: string): boolean {
@@ -177,13 +175,6 @@ const EDITOR_CSS = `
 .clickmate-running-icon { color: @accent_bg_color; }
 .clickmate-running-parent-icon { color: alpha(@accent_bg_color, 0.7); }
 
-/* Where the next run starts. Deliberately not the running colour: this one is
-   about a run that is not happening. */
-.clickmate-resume {
-    background-color: alpha(@warning_color, 0.22);
-    box-shadow: inset 4px 0 0 @warning_color;
-}
-
 /* Where recorded steps land. Faint while it is only a choice; unmistakable
    while the recording is actually running and the next click goes in here. A
    row that opens gets the rail only — a fill would run down everything inside
@@ -288,9 +279,17 @@ function iconButton(iconName: string, tooltip: string, onClick: () => void): Gtk
     return button;
 }
 
+/** As tall as a popover is allowed to get before its text starts scrolling. */
+const POPOVER_MAX_H = 420;
+
 /**
  * A ⓘ that opens a popover. For guidance too long for a subtitle and too small
  * for documentation nobody opens, kept next to the field it is about.
+ *
+ * The text scrolls. A label alone cannot be made shorter than its own wrapped
+ * height, so a long one gives the popover a minimum size it cannot meet next to
+ * a row near the edge of the screen — and a popover with nowhere to go simply
+ * does not appear, which reads as a dead button.
  */
 function infoButton(tooltip: string, markup: string, width = 46): Gtk.MenuButton {
     const label = new Gtk.Label({
@@ -304,12 +303,19 @@ function infoButton(tooltip: string, markup: string, width = 46): Gtk.MenuButton
         margin_start: 12,
         margin_end: 12,
     });
+    const scroller = new Gtk.ScrolledWindow({
+        child: label,
+        hscrollbar_policy: Gtk.PolicyType.NEVER,
+        propagate_natural_width: true,
+        propagate_natural_height: true,
+        max_content_height: POPOVER_MAX_H,
+    });
     return new Gtk.MenuButton({
         icon_name: 'help-about-symbolic',
         tooltip_text: tooltip,
         valign: Gtk.Align.CENTER,
         css_classes: ['flat'],
-        popover: new Gtk.Popover({ child: label }),
+        popover: new Gtk.Popover({ child: scroller }),
     });
 }
 
@@ -381,10 +387,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     // The step the next run continues from — at most one, so the buttons behave
     // like radio buttons that happen to be spread across the whole page.
-    private _resumeButtons = new Map<string, Gtk.ToggleButton>();
-    private _resumeMarked = '';
-    private _updatingResume = false;
-    private _resumeChangedId = 0;
 
     // The selected row: click one and a recording goes there. Kept in settings
     // rather than in a widget because the shell is what acts on it, and because
@@ -524,8 +526,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // this can arrive several times a second without disturbing an edit.
         this._runningChangedId = this._settings.connect(
             'changed::running-steps', () => this._applyRunningHighlight());
-        this._resumeChangedId = this._settings.connect(
-            'changed::resume-step', () => this._applyResumeMark());
         // Both are painted by the same pass: the target only reads as a target
         // once you can see whether it is live.
         this._targetChangedId = this._settings.connect(
@@ -539,10 +539,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             if (this._runningChangedId) {
                 this._settings.disconnect(this._runningChangedId);
                 this._runningChangedId = 0;
-            }
-            if (this._resumeChangedId) {
-                this._settings.disconnect(this._resumeChangedId);
-                this._resumeChangedId = 0;
             }
             if (this._targetChangedId) {
                 this._settings.disconnect(this._targetChangedId);
@@ -607,6 +603,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
      * the value looks like it took; a frame later the page is briefly empty,
      * GTK clamps against that, and the view is at the top again. So put it back
      * on every change of geometry until the layout settles.
+     *
+     * The other way back to the top is the keyboard focus: whatever it lands on
+     * gets scrolled into view. The rebuild drops the focus rather than let GTK
+     * choose, but a popover closing after the rebuild — the list of a dropdown
+     * you just picked from — can still hand it somewhere. So watch that too,
+     * and put the view back after it.
      */
     private _restoreScroll(offset: number): void {
         const adjustment = this._scroller()?.get_vadjustment();
@@ -619,11 +621,26 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         };
         put();
 
-        let handlerId = adjustment.connect('changed', put);
+        const undo: Array<() => void> = [];
+        const adjustmentId = adjustment.connect('changed', put);
+        undo.push(() => adjustment.disconnect(adjustmentId));
+
+        const window = this._window;
+        if (window) {
+            const focusId = window.connect('notify::focus-widget', () => {
+                // After the scrolled window has had its say about the new
+                // focus, not before it.
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    put();
+                    return GLib.SOURCE_REMOVE;
+                });
+            });
+            undo.push(() => window.disconnect(focusId));
+        }
+
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, SCROLL_SETTLE_MS, () => {
-            if (handlerId) {
-                adjustment.disconnect(handlerId);
-                handlerId = 0;
+            while (undo.length > 0) {
+                undo.pop()?.();
             }
             return GLib.SOURCE_REMOVE;
         });
@@ -631,6 +648,11 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     private _rebuildMacros(): void {
         const offset = this._scroller()?.get_vadjustment().get_value() ?? 0;
+        // Whatever had the keyboard focus is about to be destroyed — a dropdown
+        // you just picked from, say. GTK would hand the focus to some other row
+        // and scroll that one into view, undoing the restore below. It is gone
+        // either way, so let go of it here rather than let GTK choose.
+        this._window?.set_focus(null);
         this._rebuilding = true;
         for (const group of this._macroGroups) {
             this._macrosPage.remove(group);
@@ -639,7 +661,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._rebuilding = false;
         // Every row just went away, so nothing is highlighted any more either.
         this._stepRows.clear();
-        this._resumeButtons.clear();
         this._targetRows.clear();
         this._recordButtons = [];
         this._branchRows.clear();
@@ -725,7 +746,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // A rebuild in the middle of a run — after a recording, say — must not
         // lose the marker on the step the runner is on.
         this._applyRunningHighlight();
-        this._applyResumeMark();
         this._applyRecordTarget();
         this._restoreScroll(offset);
     }
@@ -755,26 +775,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._setRunState(entry, index === ids.length - 1 ? 'active' : 'ancestor');
             this._highlighted.push(id);
         });
-    }
-
-    /**
-     * Paint the step the next run starts at, and put the matching button in.
-     * Driven off the setting rather than off the button that was clicked: the
-     * shell writes to the same key when a run is paused or fails, and this way
-     * that shows up in the editor with no extra plumbing.
-     */
-    private _applyResumeMark(): void {
-        const id = this._settings.get_string('resume-step');
-
-        this._updatingResume = true;
-        for (const [stepId, button] of this._resumeButtons) {
-            button.set_active(stepId === id);
-        }
-        this._updatingResume = false;
-
-        this._stepRows.get(this._resumeMarked)?.row.remove_css_class('clickmate-resume');
-        this._resumeMarked = id;
-        this._stepRows.get(id)?.row.add_css_class('clickmate-resume');
     }
 
     /**
@@ -1089,24 +1089,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 () => this._runStepNow(macro.id, step)));
         }
 
-        // Marks where the next run picks up. At most one step in the document
-        // carries it, so turning this one on turns any other one off — through
-        // the setting, which is what the shell reads.
-        const resume = new Gtk.ToggleButton({
-            icon_name: 'go-jump-symbolic',
-            tooltip_text: _('Start the next run here instead of at the top'),
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-        });
-        resume.connect('toggled', () => {
-            if (this._updatingResume) {
-                return; // we are the ones setting it, from the setting itself
-            }
-            this._settings.set_string('resume-step', resume.get_active() ? step.id : '');
-        });
-        this._resumeButtons.set(step.id, resume);
-        row.add_suffix(resume);
-
         // Folded loops and ifs are passed over; open ones are moved into. What
         // you see is what a press does, which is why the editor decides and the
         // model only asks.
@@ -1123,10 +1105,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     this._saveAndRebuild();
                 }
             }));
-        row.add_suffix(iconButton('edit-copy-symbolic', _('Duplicate'), () => {
-            insertStep(macro.body, cloneStep(step), step.id);
-            this._saveAndRebuild();
-        }));
         row.add_suffix(iconButton('user-trash-symbolic', _('Delete'), () => {
             removeStep(macro.body, step.id);
             this._saveAndRebuild();
@@ -1706,7 +1684,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             onResult: answer => {
                 if (!answer.ok) {
                     this._toast(`${describeStep(step)}: ${answer.message ?? _('it did not run')}`);
+                    return;
                 }
+                // Stepping through a macro: the insertion point moves past what
+                // just ran, so anything recorded next goes on from there rather
+                // than back where the selection happened to be.
+                this._settings.set_string('record-into', `after:${step.id}`);
             },
         });
     }
