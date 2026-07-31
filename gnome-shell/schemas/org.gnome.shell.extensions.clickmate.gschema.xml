@@ -37,6 +37,26 @@
             <description>Id of the step the next run starts at, or empty to start at the beginning</description>
         </key>
 
+        <!-- The row selected in the editor, which is where a recording lands:
+             "after:abc123" for right behind a step, "in:abc123:body" for the end
+             of one of its bodies, empty for the end of the macro. The editor
+             picks it, the shell obeys it, and it survives a rebuild of the
+             editor because it lives out here rather than in a widget. -->
+        <key name="record-into" type="s">
+            <default>''</default>
+            <summary>Where recorded steps go</summary>
+            <description>The selected row, as "after:stepId" or "in:stepId:branch", or empty for the end of the macro</description>
+        </key>
+
+        <!-- What the shell is watching for, so the editor can go red while it
+             happens: "macro" for a whole recording, "capture" for the single
+             click the editor itself asked for, empty when neither. -->
+        <key name="recording" type="s">
+            <default>''</default>
+            <summary>Recording state</summary>
+            <description>Internal: "macro", "capture", or empty when nothing is being recorded</description>
+        </key>
+
         <!-- Preferences cannot see or draw on the screen from its own process,
              so each of these is a serialled JSON request to the shell, answered
              on the matching -result key. -->

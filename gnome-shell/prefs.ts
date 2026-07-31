@@ -26,7 +26,7 @@ import {
     describeStep,
     emptyDocument,
     insertStep,
-    moveStep,
+    moveStepNested,
     newCondition,
     newMacro,
     newStep,
@@ -49,7 +49,9 @@ const SETTINGS_FILE = 'clickmate-settings.json';
  * preferences uses to talk to the shell. Importing any of those would either
  * clobber the other export or replay a stale request.
  */
-const NOT_SETTINGS = ['macros', 'active-macro-id', 'running-steps', 'resume-step'];
+const NOT_SETTINGS = [
+    'macros', 'active-macro-id', 'running-steps', 'resume-step', 'record-into', 'recording',
+];
 
 function isTransferableKey(key: string): boolean {
     return !NOT_SETTINGS.includes(key) && !key.endsWith('-request') && !key.endsWith('-result');
@@ -167,6 +169,21 @@ const EDITOR_CSS = `
     background-color: alpha(@warning_color, 0.22);
     border-left: 4px solid @warning_color;
 }
+
+/* Where recorded steps land. Faint while it is only a choice; unmistakable
+   while the recording is actually running and the next click goes in here. A
+   row that opens gets the rail only — a fill would run down everything inside
+   it and read as though all of that were selected too. */
+.clickmate-record-target {
+    background-color: alpha(@error_color, 0.10);
+    border-left: 4px solid alpha(@error_color, 0.55);
+}
+.clickmate-record-target-block { border-left: 4px solid alpha(@error_color, 0.55); }
+.clickmate-recording-now {
+    background-color: alpha(@error_color, 0.28);
+    border-left: 4px solid @error_color;
+}
+.clickmate-recording-now-block { border-left: 4px solid @error_color; }
 `;
 
 /** How far a step inside a body sits in from the rail of that body. */
@@ -207,12 +224,6 @@ function spinRow(
         adjustment: new Gtk.Adjustment({ lower, upper, stepIncrement: step, value }),
     });
     row.connect('notify::value', () => onChange(row.get_value()));
-    return row;
-}
-
-function switchRow(title: string, subtitle: string, value: boolean, onChange: (value: boolean) => void): Adw.SwitchRow {
-    const row = new Adw.SwitchRow({ title, subtitle, active: value });
-    row.connect('notify::active', () => onChange(row.get_active()));
     return row;
 }
 
@@ -320,7 +331,8 @@ function sentPromptHelp(): string {
 
 /** What highlighting a running step needs to get at, per step id. */
 interface StepRow {
-    row: Adw.ExpanderRow;
+    /** An expander when the step has settings of its own, a plain row when not. */
+    row: Adw.ActionRow | Adw.ExpanderRow;
     icon: Gtk.Image;
     kindIcon: string;
     /** Loops and ifs get a rail rather than a fill: a fill would flood the body. */
@@ -360,6 +372,21 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     private _resumeMarked = '';
     private _updatingResume = false;
     private _resumeChangedId = 0;
+
+    // The selected row: click one and a recording goes there. Kept in settings
+    // rather than in a widget because the shell is what acts on it, and because
+    // a rebuild of the page must not lose the selection. '' is the end of the
+    // macro, "after:<stepId>" a step, "in:<stepId>:<branch>" a body.
+    private _targetRows = new Map<string, Gtk.Widget>();
+    private _recordButtons: Gtk.Button[] = [];
+    private _markedTarget = '';
+    private _targetChangedId = 0;
+    private _recordingChangedId = 0;
+
+    // The Body/Then/Else headers by "stepId:branch". Move up and down ask these
+    // whether a container is open, because folded or not is a fact about the
+    // window, not about the document.
+    private _branchRows = new Map<string, Adw.ExpanderRow>();
 
     // Every page but Macros. Their rows read the settings once, when built, so
     // importing settings has to build them again to show what arrived.
@@ -486,6 +513,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             'changed::running-steps', () => this._applyRunningHighlight());
         this._resumeChangedId = this._settings.connect(
             'changed::resume-step', () => this._applyResumeMark());
+        // Both are painted by the same pass: the target only reads as a target
+        // once you can see whether it is live.
+        this._targetChangedId = this._settings.connect(
+            'changed::record-into', () => this._applyRecordTarget());
+        this._recordingChangedId = this._settings.connect(
+            'changed::recording', () => this._applyRecordTarget());
 
         window.connect('close-request', () => {
             this._closed = true;
@@ -497,6 +530,14 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             if (this._resumeChangedId) {
                 this._settings.disconnect(this._resumeChangedId);
                 this._resumeChangedId = 0;
+            }
+            if (this._targetChangedId) {
+                this._settings.disconnect(this._targetChangedId);
+                this._targetChangedId = 0;
+            }
+            if (this._recordingChangedId) {
+                this._settings.disconnect(this._recordingChangedId);
+                this._recordingChangedId = 0;
             }
             this._store.destroy();
             return false;
@@ -539,6 +580,9 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // Every row just went away, so nothing is highlighted any more either.
         this._stepRows.clear();
         this._resumeButtons.clear();
+        this._targetRows.clear();
+        this._recordButtons = [];
+        this._branchRows.clear();
         this._highlighted = [];
 
         const actions = new Adw.PreferencesGroup({
@@ -575,6 +619,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             selector.connect('notify::selected', () => {
                 const id = ids[selector.get_selected()];
                 if (id && id !== this._store.activeMacroId) {
+                    // The chosen body belongs to the macro being left behind.
+                    this._settings.set_string('record-into', '');
                     this._store.activeMacroId = id;
                 }
             });
@@ -620,6 +666,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // lose the marker on the step the runner is on.
         this._applyRunningHighlight();
         this._applyResumeMark();
+        this._applyRecordTarget();
     }
 
     // --- running position --------------------------------------------------
@@ -669,6 +716,64 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._stepRows.get(id)?.row.add_css_class('clickmate-resume');
     }
 
+    /**
+     * Paint the list a recording goes into, and turn it red while one is
+     * actually running — the point of showing it here at all is that the panel
+     * icon is a long way from the body you chose.
+     */
+    private _applyRecordTarget(): void {
+        const target = this._settings.get_string('record-into');
+
+        const marked = this._targetRows.get(this._markedTarget);
+        for (const cls of ['clickmate-record-target', 'clickmate-recording-now']) {
+            marked?.remove_css_class(cls);
+            marked?.remove_css_class(`${cls}-block`);
+        }
+        this._markedTarget = target;
+
+        const recording = this._settings.get_string('recording') !== '';
+        const row = this._targetRows.get(target);
+        if (row) {
+            const base = recording ? 'clickmate-recording-now' : 'clickmate-record-target';
+            row.add_css_class(row instanceof Adw.ExpanderRow ? `${base}-block` : base);
+        }
+
+        // The buttons that ask for one captured click cannot work during a whole
+        // recording, and go red rather than dead so the reason is visible.
+        for (const button of this._recordButtons) {
+            if (recording) {
+                button.add_css_class('destructive-action');
+            } else {
+                button.remove_css_class('destructive-action');
+            }
+        }
+    }
+
+    /** Is this body open on screen? What move up and down mean depends on it. */
+    private _isBranchOpen(stepId: string, listKey: string): boolean {
+        return this._branchRows.get(`${stepId}:${listKey}`)?.get_expanded() ?? false;
+    }
+
+    /**
+     * Clicking a row selects it, and a recording goes there: after a step, or
+     * into a body. The click is watched on the way down rather than on the way
+     * up, and the sequence is never claimed, so the row still does whatever it
+     * did before — a step still folds open, a button still fires. Rows nest, and
+     * capture order runs outermost first, so the innermost row you actually
+     * clicked is the one that has the last word.
+     */
+    private _selectable(row: Gtk.Widget, target: string): void {
+        const click = new Gtk.GestureClick();
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE);
+        click.connect('pressed', () => {
+            if (this._settings.get_string('record-into') !== target) {
+                this._settings.set_string('record-into', target);
+            }
+        });
+        row.add_controller(click);
+        this._targetRows.set(target, row);
+    }
+
     private _runningStepIds(): string[] {
         try {
             const raw = this._settings.get_string('running-steps');
@@ -711,6 +816,33 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         }
     }
 
+    /**
+     * A dropdown that is also the button: its first entry is the label, and
+     * picking any of the others adds that step there and then. Two clicks for a
+     * step instead of three, and no Add button left sitting next to a dropdown
+     * whose value you already chose.
+     */
+    private _addStepDropdown(into: Step[]): Gtk.DropDown {
+        const model = new Gtk.StringList();
+        model.append(_('Add a step…'));
+        for (const kind of STEP_KINDS) {
+            model.append(STEP_KIND_LABELS[kind]);
+        }
+        const dropdown = new Gtk.DropDown({ model, valign: Gtk.Align.CENTER });
+        dropdown.connect('notify::selected', () => {
+            const index = dropdown.get_selected();
+            if (index < 1 || index > STEP_KINDS.length || this._rebuilding) {
+                return;   // the title itself, or the page being torn down
+            }
+            into.push(newStep(STEP_KINDS[index - 1]));
+            // The rebuild replaces this widget anyway; reset in case it does not
+            // get that far, so the title is what a returning eye sees.
+            dropdown.set_selected(0);
+            this._saveAndRebuild();
+        });
+        return dropdown;
+    }
+
     private _buildMacroGroup(macro: Macro): Adw.PreferencesGroup {
         const group = new Adw.PreferencesGroup({ title: macro.name });
 
@@ -731,26 +863,24 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._save();
         }));
 
-        const addRow = new Adw.ActionRow({ title: _('Add a step') });
-        const kindModel = new Gtk.StringList();
-        for (const kind of STEP_KINDS) {
-            kindModel.append(STEP_KIND_LABELS[kind]);
-        }
-        const kindDropdown = new Gtk.DropDown({ model: kindModel, valign: Gtk.Align.CENTER });
-        const addStepButton = new Gtk.Button({ label: _('Add'), valign: Gtk.Align.CENTER });
-        addStepButton.connect('clicked', () => {
-            macro.body.push(newStep(STEP_KINDS[kindDropdown.get_selected()]));
-            this._saveAndRebuild();
+        const addRow = new Adw.ActionRow({
+            title: _('The end of the macro'),
+            subtitle: _('Add a step here, or send a recording here'),
         });
         const recordButton = new Gtk.Button({
-            label: _('Record'),
+            label: _('Record one'),
             tooltip_text: _('Click anywhere on screen, or move the pointer and hold still, to add that as a step'),
             valign: Gtk.Align.CENTER,
         });
         recordButton.connect('clicked', () => this._captureStepInto(macro.id, null, null));
+        this._recordButtons.push(recordButton);
 
-        addRow.add_suffix(kindDropdown);
-        addRow.add_suffix(addStepButton);
+        // Only the selected macro is ever recorded into, so only its rows are
+        // selectable — a highlight on a macro nothing records into would lie.
+        if (macro.id === this._store.activeMacroId) {
+            this._selectable(addRow, '');
+        }
+        addRow.add_suffix(this._addStepDropdown(macro.body));
         addRow.add_suffix(recordButton);
         group.add(addRow);
 
@@ -808,10 +938,14 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     ): Gtk.Widget[] {
         const stepKey = `step:${step.id}`;
         const children = childLists(step);
-        const row = this._expander(stepKey, {
-            title: describeStep(step),
-            subtitle: this._stepSubtitle(step),
-        });
+        // A card that opens onto nothing is a card that should not open. Steps
+        // with settings of their own keep the expander; the rest — a repeat, a
+        // break — are one line, and clicking them only selects them.
+        const fields = this._buildStepFields(macro, step);
+        const props = { title: describeStep(step), subtitle: this._stepSubtitle(step) };
+        const row: Adw.ActionRow | Adw.ExpanderRow = fields.length > 0
+            ? this._expander(stepKey, props)
+            : new Adw.ActionRow(props);
         const widgets: Gtk.Widget[] = [row];
         const branchRows: Adw.ExpanderRow[] = [];
 
@@ -850,6 +984,45 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         });
         row.add_prefix(enabled);
 
+        // A repeat has exactly one setting, so it lives on the row rather than
+        // behind a fold: the count, and a toggle for having no count at all.
+        if (step.kind === 'loop') {
+            const forever = new Gtk.ToggleButton({
+                icon_name: 'media-playlist-repeat-symbolic',
+                tooltip_text: _('Repeat without a limit'),
+                active: step.count === 'forever',
+                valign: Gtk.Align.CENTER,
+                css_classes: ['flat'],
+            });
+            const count = new Gtk.SpinButton({
+                adjustment: new Gtk.Adjustment({
+                    lower: 1, upper: 1000000, step_increment: 1, page_increment: 10,
+                    value: typeof step.count === 'number' ? step.count : 10,
+                }),
+                tooltip_text: _('How many times to go round'),
+                valign: Gtk.Align.CENTER,
+                visible: step.count !== 'forever',
+                numeric: true,
+                width_chars: 3,
+            });
+            forever.connect('toggled', () => {
+                step.count = forever.get_active() ? 'forever' : count.get_value_as_int();
+                count.set_visible(!forever.get_active());
+                row.set_title(describeStep(step));
+                this._save();
+            });
+            count.connect('value-changed', () => {
+                if (forever.get_active()) {
+                    return;
+                }
+                step.count = count.get_value_as_int();
+                row.set_title(describeStep(step));
+                this._save();
+            });
+            row.add_suffix(count);
+            row.add_suffix(forever);
+        }
+
         // Marks where the next run picks up. At most one step in the document
         // carries it, so turning this one on turns any other one off — through
         // the setting, which is what the shell reads.
@@ -868,16 +1041,22 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._resumeButtons.set(step.id, resume);
         row.add_suffix(resume);
 
-        row.add_suffix(iconButton('go-up-symbolic', _('Move up'), () => {
-            if (moveStep(macro.body, step.id, -1)) {
-                this._saveAndRebuild();
-            }
-        }));
-        row.add_suffix(iconButton('go-down-symbolic', _('Move down'), () => {
-            if (moveStep(macro.body, step.id, 1)) {
-                this._saveAndRebuild();
-            }
-        }));
+        // Folded loops and ifs are passed over; open ones are moved into. What
+        // you see is what a press does, which is why the editor decides and the
+        // model only asks.
+        const open = (stepId: string, listKey: string) => this._isBranchOpen(stepId, listKey);
+        row.add_suffix(iconButton('go-up-symbolic',
+            _('Move up — into an open body above, or past a folded one'), () => {
+                if (moveStepNested(macro.body, step.id, -1, open)) {
+                    this._saveAndRebuild();
+                }
+            }));
+        row.add_suffix(iconButton('go-down-symbolic',
+            _('Move down — into an open body below, or past a folded one'), () => {
+                if (moveStepNested(macro.body, step.id, 1, open)) {
+                    this._saveAndRebuild();
+                }
+            }));
         row.add_suffix(iconButton('edit-copy-symbolic', _('Duplicate'), () => {
             insertStep(macro.body, cloneStep(step), step.id);
             this._saveAndRebuild();
@@ -887,13 +1066,14 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._saveAndRebuild();
         }));
 
-        row.add_row(entryRow(_('Note'), step.note ?? '', text => {
-            step.note = text;
-            this._save();
-        }));
+        if (macro.id === this._store.activeMacroId) {
+            this._selectable(row, `after:${step.id}`);
+        }
 
-        for (const child of this._buildStepFields(macro, step)) {
-            row.add_row(child);
+        if (row instanceof Adw.ExpanderRow) {
+            for (const child of fields) {
+                row.add_row(child);
+            }
         }
 
         // Nested bodies. Each is its own block: coloured rail, own icon, and the
@@ -914,7 +1094,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 valign: Gtk.Align.CENTER,
             }));
             branchRows.push(nested);
+            this._branchRows.set(`${step.id}:${list.key}`, nested);
             widgets.push(nested);
+
+            if (macro.id === this._store.activeMacroId) {
+                this._selectable(nested, `in:${step.id}:${list.key}`);
+            }
 
             const addNested = new Adw.ActionRow({ title: _('Add a step here') });
             addNested.set_margin_start(INDENT_PX);   // lines up with the steps below it
@@ -922,25 +1107,15 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 icon_name: 'list-add-symbolic',
                 valign: Gtk.Align.CENTER,
             }));
-            const nestedModel = new Gtk.StringList();
-            for (const kind of STEP_KINDS) {
-                nestedModel.append(STEP_KIND_LABELS[kind]);
-            }
-            const nestedDropdown = new Gtk.DropDown({ model: nestedModel, valign: Gtk.Align.CENTER });
-            const nestedAdd = new Gtk.Button({ label: _('Add'), valign: Gtk.Align.CENTER });
-            nestedAdd.connect('clicked', () => {
-                list.steps.push(newStep(STEP_KINDS[nestedDropdown.get_selected()]));
-                this._saveAndRebuild();
-            });
             const nestedRecord = new Gtk.Button({
-                label: _('Record'),
+                label: _('Record one'),
                 tooltip_text: _('Click anywhere on screen, or move the pointer and hold still, to add that as a step'),
                 valign: Gtk.Align.CENTER,
             });
             nestedRecord.connect('clicked', () => this._captureStepInto(macro.id, step.id, list.key));
+            this._recordButtons.push(nestedRecord);
 
-            addNested.add_suffix(nestedDropdown);
-            addNested.add_suffix(nestedAdd);
+            addNested.add_suffix(this._addStepDropdown(list.steps));
             addNested.add_suffix(nestedRecord);
             nested.add_row(addNested);
 
@@ -1068,25 +1243,10 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 }));
                 break;
 
-            case 'loop': {
-                const forever = step.count === 'forever';
-                rows.push(switchRow(
-                    _('No iteration limit'),
-                    _('Otherwise stop after a fixed number of times'),
-                    forever,
-                    value => {
-                        step.count = value ? 'forever' : 10;
-                        rebuild();
-                    },
-                ));
-                if (!forever) {
-                    rows.push(spinRow(_('Maximum iterations'), step.count as number, 1, 1000000, 1, value => {
-                        step.count = Math.round(value);
-                        save();
-                    }));
-                }
+            // No rows: a repeat's count sits on the row itself, which is what
+            // keeps the card from opening onto a single setting.
+            case 'loop':
                 break;
-            }
 
             case 'if':
                 rows.push(...this._buildConditionSection(_('Condition'), step.cond, next => {

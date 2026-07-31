@@ -1,6 +1,7 @@
 import {
     parseDocument, stringifyDocument, newStep, describeStep, describeCondition,
-    insertStep, moveStep, removeStep, cloneStep, walk, findStep, newMacro,
+    insertStep, moveStep, moveStepNested, parentOf, removeStep, cloneStep, walk, findStep, newMacro,
+    resolveRecordTarget,
     STEP_KIND_LABELS, parseNumbers, reachesEnd, lastPointerEndpoint,
     AUTHORABLE_STEP_KINDS,
 } from '../dist/src/model.js';
@@ -44,6 +45,102 @@ check('remove', removeStep(macro.body, b.id)?.id === b.id);
 let counted = 0;
 walk(macro.body, () => counted++);
 check('walk visits nested', counted >= 3, String(counted));
+
+// moving with the folded/open cards of the editor in mind
+const closed = () => false;
+const open = () => true;
+{
+    const m = newMacro('m');
+    const one = newStep('click'), lp = newStep('loop'), two = newStep('wait');
+    const held = newStep('key');
+    lp.body.push(held);
+    m.body.push(one, lp, two);
+
+    check('folded loop is stepped over',
+          moveStepNested(m.body, one.id, 1, closed) &&
+          m.body.map(s => s.id).join() === [lp.id, one.id, two.id].join());
+    // put it back before the loop
+    moveStepNested(m.body, one.id, -1, closed);
+
+    check('open loop is stepped into',
+          moveStepNested(m.body, one.id, 1, open) &&
+          lp.body.map(s => s.id).join() === [one.id, held.id].join() &&
+          m.body.map(s => s.id).join() === [lp.id, two.id].join());
+    check('and the body knows who its parent is',
+          parentOf(m.body, one.id)?.step.id === lp.id);
+    check('the top of a body climbs back out above the loop',
+          moveStepNested(m.body, one.id, -1, open) &&
+          m.body.map(s => s.id).join() === [one.id, lp.id, two.id].join());
+
+    check('coming up from below lands at the bottom of the body',
+          moveStepNested(m.body, two.id, -1, open) &&
+          lp.body.map(s => s.id).join() === [held.id, two.id].join());
+    check('and the bottom of a body climbs out below the loop',
+          moveStepNested(m.body, two.id, 1, open) &&
+          m.body.map(s => s.id).join() === [one.id, lp.id, two.id].join());
+    check('the very first step has nowhere to go up',
+          moveStepNested(m.body, one.id, -1, open) === false);
+    check('the very last step has nowhere to go down',
+          moveStepNested(m.body, two.id, 1, open) === false);
+}
+{
+    // An if offers two bodies: enter by whichever side you arrive from, and only
+    // if that side is open.
+    const m = newMacro('m');
+    const before = newStep('click'), gate = newStep('if'), after = newStep('wait');
+    m.body.push(before, gate, after);
+    const thenOnly = (id, key) => key === 'then';
+
+    check('moving down enters then',
+          moveStepNested(m.body, before.id, 1, open) &&
+          gate.then.map(s => s.id).join() === before.id);
+    check('moving up enters else',
+          moveStepNested(m.body, after.id, -1, open) &&
+          gate.else.map(s => s.id).join() === after.id);
+    moveStepNested(m.body, after.id, 1, open);   // back out below
+    check('a folded else is not entered from below',
+          moveStepNested(m.body, after.id, -1, thenOnly) &&
+          gate.then.map(s => s.id).join() === [before.id, after.id].join());
+}
+
+{
+    // The row the editor selected, as the shell reads it back. Landing a
+    // recording in a loop body rather than after the loop is the whole point,
+    // so it is worth a test that does not need a compositor to run.
+    const m = newMacro('m');
+    const first = newStep('click'), loop = newStep('loop'), gate = newStep('if');
+    m.body.push(first, loop, gate);
+    const inside = newStep('wait');
+    loop.body.push(inside);
+
+    const drop = (raw, step) => {
+        const target = resolveRecordTarget(m.body, raw);
+        target.list.splice(target.at, 0, step);
+        return target;
+    };
+
+    check('no selection is the end of the macro',
+          resolveRecordTarget(m.body, '').at === 3 &&
+          resolveRecordTarget(m.body, '').where === '');
+    check('a body lands inside the loop, after what is already there',
+          drop(`in:${loop.id}:body`, newStep('text')).list === loop.body &&
+          loop.body.map(s => s.kind).join() === 'wait,text');
+    check('and says where it went',
+          resolveRecordTarget(m.body, `in:${loop.id}:body`).where === 'the body of Repeat forever');
+    check('an if names the branch it was given',
+          resolveRecordTarget(m.body, `in:${gate.id}:else`).list === gate.else);
+    check('a step lands right behind it, not at the end',
+          drop(`after:${first.id}`, newStep('scroll')).at === 1 &&
+          m.body.map(s => s.kind).join() === 'click,scroll,loop,if');
+    check('a nested step lands inside the body it lives in',
+          drop(`after:${inside.id}`, newStep('key')).list === loop.body &&
+          loop.body.map(s => s.kind).join() === 'wait,key,text');
+    check('a deleted step falls back to the end of the macro',
+          resolveRecordTarget(m.body, 'after:gone').where === '' &&
+          resolveRecordTarget(m.body, 'after:gone').at === m.body.length);
+    check('so does a target from an older version',
+          resolveRecordTarget(m.body, `${loop.id}:body`).where === '');
+}
 
 // round trip
 const doc = { version: 1, macros: [starterMacro()] };

@@ -20,8 +20,8 @@ import { Recorder, acceleratorToEvdevCodes } from './src/recorder.js';
 import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
 import {
-    childLists, describeStep, findStep, lastPointerEndpoint, reachesEnd,
-    type Macro, type Step,
+    childLists, describeStep, findStep, lastPointerEndpoint, reachesEnd, resolveRecordTarget,
+    type Macro, type RecordTarget, type Step,
 } from './src/model.js';
 import { clearProblems, onProblemsChanged, problemCount, reportProblem } from './src/problems.js';
 import { MacroPopup } from './ui/popup.js';
@@ -162,6 +162,11 @@ export default class ClickmateExtension extends Extension {
         this._publishRunningPath();
 
         clearMarker();
+        // Nothing is recording once we are gone; a stale "yes" here would leave
+        // the editor painted red until the next recording corrected it.
+        if (this._settings?.get_string('recording')) {
+            this._settings.set_string('recording', '');
+        }
         this._recorder?.cancel();
         this._runner?.stop();
         this._recorder?.destroy();
@@ -284,6 +289,13 @@ export default class ClickmateExtension extends Extension {
             this._icon.add_style_class_name('clickmate-problem-icon');
         } else {
             this._icon.remove_style_class_name('clickmate-problem-icon');
+        }
+
+        // The editor is usually the window you are looking at while this
+        // happens, and it cannot see the panel icon from over there.
+        const state = this._recorder?.recording ? 'macro' : this._recorder?.busy ? 'capture' : '';
+        if (this._settings && this._settings.get_string('recording') !== state) {
+            this._settings.set_string('recording', state);
         }
         // The popup keeps its own subscription, so the list is already current.
     }
@@ -416,8 +428,8 @@ export default class ClickmateExtension extends Extension {
             return fail('no macro to add to', 'Create one in Settings → Macros first.');
         }
 
-        const list = this._targetList(macro, target);
-        if (!list) {
+        const where = this._targetList(macro, target);
+        if (!where) {
             return fail('could not find where to add the step',
                 'The step you were adding into may have been deleted. Close and reopen Settings.');
         }
@@ -438,7 +450,7 @@ export default class ClickmateExtension extends Extension {
                 'Click somewhere, or move the pointer and hold it still, while it waits.');
         }
 
-        list.push(step);
+        where.list.splice(where.at, 0, step);
         this._store.save();
 
         const message = `Added: ${describeStep(step)}`;
@@ -446,9 +458,19 @@ export default class ClickmateExtension extends Extension {
         return { ok: true, message };
     }
 
-    private _targetList(macro: Macro, target?: CaptureTarget): Step[] | null {
-        if (!target?.parentStepId) {
-            return macro.body;
+    /** Where a recording lands: whichever row the editor has selected. */
+    private _recordTarget(macro: Macro): RecordTarget {
+        return resolveRecordTarget(macro.body, this._settings?.get_string('record-into') ?? '');
+    }
+
+    private _targetList(macro: Macro, target?: CaptureTarget): { list: Step[]; at: number } | null {
+        if (!target) {
+            // Nobody named a list, so the editor's choice stands. A request from
+            // preferences always names one, even when that one is the top.
+            return this._recordTarget(macro);
+        }
+        if (!target.parentStepId) {
+            return { list: macro.body, at: macro.body.length };
         }
         const loc = findStep(macro.body, target.parentStepId);
         if (!loc) {
@@ -456,7 +478,7 @@ export default class ClickmateExtension extends Extension {
         }
         const lists = childLists(loc.step);
         const match = lists.find(list => list.key === target.listKey) ?? lists[0];
-        return match ? match.steps : null;
+        return match ? { list: match.steps, at: match.steps.length } : null;
     }
 
     /**
@@ -521,11 +543,14 @@ export default class ClickmateExtension extends Extension {
 
         if (this._recorder.recording) {
             const steps = await this._recorder.stop();
+            const target = this._recordTarget(macro);
             // Appending after an endless loop would put them somewhere that never
             // runs, which is otherwise invisible until you wonder why nothing
-            // happens.
-            const stranded = steps.length > 0 && !reachesEnd(macro.body);
-            macro.body.push(...steps);
+            // happens. Inside a body there is no such trap: that is where the
+            // loop goes round.
+            const atEnd = target.list === macro.body && target.at === macro.body.length;
+            const stranded = steps.length > 0 && atEnd && !reachesEnd(macro.body);
+            target.list.splice(target.at, 0, ...steps);
             this._store.save();
             this._updateIcon();
             this._popup?.refresh();
@@ -554,7 +579,9 @@ export default class ClickmateExtension extends Extension {
         try {
             this._updateIgnoredRecordingKeys();
             await this._recorder.start(lastPointerEndpoint(macro.body));
-            Main.notify('Clickmate', `Recording into “${macro.name}”. Press the shortcut again to stop.`);
+            const where = this._recordTarget(macro).where;
+            Main.notify('Clickmate', `Recording into “${macro.name}”${where ? `, ${where}` : ''}. ` +
+                'Press the shortcut again to stop.');
         } catch (error) {
             reportProblem('Recording', `could not start: ${(error as Error).message}`, {
                 hint: 'The daemon has to be running and capturing your devices. ' +
@@ -607,6 +634,9 @@ export default class ClickmateExtension extends Extension {
             // Preferences can set it too, by marking a step to continue from.
             this._popup?.refresh();
             return;
+        }
+        if (key === 'record-into' || key === 'recording') {
+            return; // the editor's choice and our own state; nothing to redo here
         }
         if (key === 'pick-region-request') {
             void this._answerRequest('pick-region', async () => ({ region: await pickRegion() }));

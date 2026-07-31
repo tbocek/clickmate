@@ -40,6 +40,8 @@ repeat forever:
   running, and a way into the settings.
 - **Pause and continue** — halting a run remembers the step it was on, and you
   can mark any step in the editor as where the next run starts.
+- **Record straight into a loop body** — click the row a recording should land
+  on, and watch it go red while the recording runs.
 - **Emergency stop** that aborts mid-macro and releases every held key.
 
 ## How it fits together
@@ -207,21 +209,39 @@ fixed coordinates could click its own menu. It carries on as soon as you move
 off the menu or close it.
 
 Build a macro by recording it (`Ctrl+Shift+R`), then open Settings to adjust it.
-Recorded steps are appended to the end of the selected macro — if that macro is
-already an endless loop, you are told so, because the new steps would sit
-somewhere that never runs.
+Recorded steps go on the row you selected. Click any row in the selected macro
+and it is tinted to show it: a step, and the recording is dropped in right after
+it; a **Body**, **Then** or **Else** header, and the recording goes at the end of
+that body. Selecting nothing leaves **The end of the macro**, which is where a
+recording goes by default. Choose the body of a loop and a recording lands inside
+the loop instead of after it — which is what you want in a macro that is one
+endless loop, and until now meant recording at the end and moving every step in
+by hand. Appending to the end of a macro that never gets there still tells you
+so; a body has no such trap.
+
+While a recording is running, the selected row turns a stronger red, so you can
+see where the next click will land without looking at the panel.
 
 Recording always resumes from wherever the macro already leaves the pointer.
 Between two sessions the mouse gets used for other things, and moving it back to
 that spot is not a step worth keeping, so it is not recorded. Anywhere else is,
 at its true screen position — coordinates are never shifted.
 
-Next to every **Add** button there is a **Record** button that captures a single
-action, which is the quickest way to fill in coordinates: the window gets out of
-the way, and the next click you make becomes a `click` step at that position. If
-you move the pointer and hold still for about a second instead, you get a `move`
-step. `Ctrl+Shift+M` does the same thing without opening Settings, appending to
-the end of the selected macro.
+Steps are added from the **Add a step…** dropdown, which is also the button:
+picking a kind adds it there, at the end of whichever list the dropdown sits in.
+Next to it, **Record one** captures a single action, which is the quickest way
+to fill in coordinates: the window gets out of the way, and the next click you
+make becomes a `click` step at that position. If you move the pointer and hold
+still for about a second instead, you get a `move` step. `Ctrl+Shift+M` does the
+same thing without opening Settings, into whichever row is selected.
+
+**Move up** and **Move down** treat the editor as what you see. A folded loop is
+one card, so a step passes it in a single press; an open one is a place with an
+inside, so the same press moves the step into it — in at the top coming down, in
+at the bottom coming up. An `if` is entered by the side you arrive from: `then`
+from above, `else` from below, skipping either if it is folded shut. Pressing on
+past the end of a body climbs back out around the loop, so nothing that moved in
+is stuck there.
 
 Coordinates are single fields — `100, 200` for a point, `10, 20, 40, 40` for an
 area — each with a **Show** button that flashes a red X (or an outline) at that

@@ -335,6 +335,46 @@ export function findStep(list: Step[], id: string): StepLocation | null {
     return found;
 }
 
+/** Where a recording lands: a list, and the index to put the first step at. */
+export interface RecordTarget {
+    list: Step[];
+    at: number;
+    /** How to name the spot in a notification; empty for the end of the macro. */
+    where: string;
+}
+
+/**
+ * Read the row preferences has selected. `after:<id>` is a step, and puts the
+ * recording right behind it; `in:<id>:<branch>` is a body, and puts it at the
+ * end of that body; anything else — empty, unrecognised, or naming a step that
+ * has since been deleted or belongs to another macro — is the end of the macro.
+ * Falling back rather than failing is deliberate: a stale selection should cost
+ * you a move, not a recording.
+ */
+export function resolveRecordTarget(body: Step[], raw: string): RecordTarget {
+    const end: RecordTarget = { list: body, at: body.length, where: '' };
+    const [what, stepId, listKey] = raw.split(':');
+    if (!stepId || (what !== 'after' && what !== 'in')) {
+        return end;
+    }
+    const loc = findStep(body, stepId);
+    if (!loc) {
+        return end;
+    }
+    if (what === 'after') {
+        return { list: loc.list, at: loc.index + 1, where: `after ${describeStep(loc.step)}` };
+    }
+    const lists = childLists(loc.step);
+    const match = lists.find(list => list.key === listKey) ?? lists[0];
+    return match
+        ? {
+            list: match.steps,
+            at: match.steps.length,
+            where: `the ${match.key} of ${describeStep(loc.step)}`,
+        }
+        : end;
+}
+
 export function removeStep(list: Step[], id: string): Step | null {
     const loc = findStep(list, id);
     if (!loc) {
@@ -355,6 +395,70 @@ export function moveStep(list: Step[], id: string, delta: number): boolean {
     }
     const [step] = loc.list.splice(loc.index, 1);
     loc.list.splice(target, 0, step);
+    return true;
+}
+
+/** The container a step sits inside, and where that container itself sits. */
+export function parentOf(root: Step[], id: string): StepLocation | null {
+    let found: StepLocation | null = null;
+    walk(root, loc => {
+        for (const child of childLists(loc.step)) {
+            if (!found && child.steps.some(s => s.id === id)) {
+                found = loc;
+            }
+        }
+    });
+    return found;
+}
+
+/**
+ * Move a step one place up or down, treating an open container as somewhere you
+ * can move into. Which is the whole point: a folded loop is one card on screen,
+ * so a step should pass it in a single press, while an open one is a place with
+ * an inside, and the press that walks up to its edge should walk in.
+ *
+ * `isOpen` answers that for one branch of one container, and comes from the
+ * editor, because the answer is which cards are folded on screen right now.
+ * Reaching the end of a body and pressing again climbs back out, past the
+ * container — otherwise a step that moved in could never leave.
+ */
+export function moveStepNested(
+    root: Step[],
+    id: string,
+    delta: 1 | -1,
+    isOpen: (stepId: string, listKey: string) => boolean,
+): boolean {
+    const loc = findStep(root, id);
+    if (!loc) {
+        return false;
+    }
+
+    const neighbour = loc.index + delta;
+    if (neighbour >= 0 && neighbour < loc.list.length) {
+        const sibling = loc.list[neighbour];
+        const open = childLists(sibling).filter(list => isOpen(sibling.id, list.key));
+        const [step] = loc.list.splice(loc.index, 1);
+        if (open.length > 0) {
+            // Enter by the near side: coming down, land on top of the first open
+            // branch; coming up, land at the bottom of the last one.
+            const target = delta === 1 ? open[0] : open[open.length - 1];
+            if (delta === 1) {
+                target.steps.unshift(step);
+            } else {
+                target.steps.push(step);
+            }
+        } else {
+            loc.list.splice(neighbour, 0, step);
+        }
+        return true;
+    }
+
+    const parent = parentOf(root, id);
+    if (!parent) {
+        return false;   // already at the top or bottom of the macro
+    }
+    const [step] = loc.list.splice(loc.index, 1);
+    parent.list.splice(parent.index + (delta === 1 ? 1 : 0), 0, step);
     return true;
 }
 
