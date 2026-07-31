@@ -58,6 +58,14 @@ export interface PlayResult {
 
 export class DaemonError extends Error {}
 
+/**
+ * The right to play, for as long as one macro holds it. `DaemonClient` is one
+ * of these — the plain queue — and `exclusive` hands out a private one.
+ */
+export interface Playback {
+    play(events: RawEvent[]): Promise<PlayResult>;
+}
+
 interface AsyncSocketClient {
     connect_async(address: Gio.SocketAddress, cancellable: Gio.Cancellable | null): Promise<Gio.SocketConnection>;
 }
@@ -193,15 +201,39 @@ export class DaemonClient {
     /**
      * Play an event train. The daemon answers only once the train has finished,
      * so the returned promise resolves when the input has actually been sent.
-     */
-    /**
-     * The daemon plays one event train at a time and answers "busy" to anything
-     * that arrives during one. Several macros running at once would hit that
-     * constantly, and a busy answer is a failed step rather than a short wait —
-     * so they queue up here instead, one step each, in the order they asked.
+     *
+     * It plays one train at a time and answers "busy" to anything that arrives
+     * during one. Several macros running at once would hit that constantly, and
+     * a busy answer is a failed step rather than a short wait — so they queue up
+     * here instead, one step each, in the order they asked.
      */
     async play(events: RawEvent[]): Promise<PlayResult> {
-        const turn = this._turn.then(() => this._play(events), () => this._play(events));
+        return this._queue(() => this._play(events));
+    }
+
+    /**
+     * Hold the queue for a whole piece of work rather than for one train, and
+     * play through the handle it is given. Everything that handle plays goes out
+     * back to back, with nothing from another macro in between.
+     *
+     * This is what a click at a fixed position needs. Getting there is a
+     * conversation — nudge, read the pointer back, nudge again — and a nudge
+     * from another macro landing in the middle of it moves the very pointer
+     * being measured, so both macros end up chasing each other's corrections.
+     *
+     * Held for as long as `work` runs, so `work` must be something that ends:
+     * a bounded walk and the click at the end of it, not a whole macro.
+     */
+    async exclusive<T>(work: (lease: Playback) => Promise<T>): Promise<T> {
+        // Straight to _play: this is already the queue's turn, and going through
+        // play() again would put the work behind a turn that is waiting for it.
+        const lease: Playback = { play: events => this._play(events) };
+        return this._queue(() => work(lease));
+    }
+
+    /** Run `job` once everything asked for before it has finished. */
+    private _queue<T>(job: () => Promise<T>): Promise<T> {
+        const turn = this._turn.then(job, job);
         // The queue must not stop at the first failure, and an unhandled
         // rejection on it would be reported twice: the caller gets the real one.
         this._turn = turn.then(() => {}, () => {});

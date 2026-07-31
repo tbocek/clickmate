@@ -56,9 +56,6 @@ function isTransferableKey(key: string): boolean {
     return !NOT_SETTINGS.includes(key) && !key.endsWith('-request') && !key.endsWith('-result');
 }
 
-function homeFile(name: string): string {
-    return GLib.build_filenamev([GLib.get_home_dir(), name]);
-}
 
 /**
  * Screenshots are scaled by width, so on the 16:9 screen these names come from
@@ -110,6 +107,7 @@ const STEP_ICONS: Record<StepKind, string> = {
     if: 'media-playlist-shuffle-symbolic',
     break: 'application-exit-symbolic',   // an arrow leaving: out of the loop, not the macro
     continue: 'media-skip-forward-symbolic',
+    start: 'view-refresh-symbolic',       // start, and start again: the same request
     stop: 'process-stop-symbolic',
 };
 
@@ -426,6 +424,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         values: number[],
         onChange: (values: number[]) => void,
         onShow?: (values: number[]) => void,
+        /**
+         * Turns a position picked off the screen into the whole row. Given the
+         * point and what the row holds now, so a rectangle can keep its size and
+         * move its corner. Adds a **Pick** button when supplied.
+         */
+        fromPoint?: (x: number, y: number, current: number[]) => number[],
     ): Adw.EntryRow {
         const row = new Adw.EntryRow({ title });
         row.set_text(values.join(', '));
@@ -443,6 +447,22 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         });
         row.connect('changed', commit);
 
+        if (fromPoint) {
+            const pick = new Gtk.Button({
+                label: _('Pick'),
+                tooltip_text: _('Go to the spot and click: that position lands here'),
+                valign: Gtk.Align.CENTER,
+            });
+            pick.connect('clicked', () => this._pickPointInto(point => {
+                const parsed = parseNumbers(row.get_text() ?? '', values.length) ?? current;
+                const next = fromPoint(point.x, point.y, parsed);
+                // Through the row, so the same parse-and-commit path runs and
+                // what you see is what was saved.
+                row.set_text(next.join(', '));
+            }));
+            row.add_suffix(pick);
+        }
+
         if (onShow) {
             const show = new Gtk.Button({
                 label: _('Show'),
@@ -459,6 +479,112 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         return row;
     }
 
+
+    /**
+     * A pair of numbers as a field on a row rather than a row of its own, so a
+     * position can share one line with the buttons that act on it.
+     */
+    private _numbersEntry(values: number[], onChange: (values: number[]) => void): Gtk.Entry {
+        const entry = new Gtk.Entry({
+            text: values.join(', '),
+            placeholder_text: 'x, y',
+            width_chars: 10,
+            max_width_chars: 12,
+            valign: Gtk.Align.CENTER,
+            xalign: 1,
+        });
+        const commit = debounce(() => {
+            const parsed = parseNumbers(entry.get_text() ?? '', values.length);
+            if (parsed) {
+                entry.remove_css_class('error');
+                onChange(parsed);
+            } else {
+                entry.add_css_class('error');
+            }
+        });
+        entry.connect('changed', commit);
+        return entry;
+    }
+
+    /**
+     * Where a click or a move goes, in one row: the numbers, and a button that
+     * says whether they are used at all. Both used to be two rows — a dropdown
+     * naming a mode, and under it the coordinates the mode was about — which is
+     * a line of prose and a line of numbers to say one thing.
+     *
+     * `on` is the toggled state: for a click it has no numbers (the pointer is
+     * already wherever it is), for a move it has the offset instead of a
+     * position. **Pick** and **Show** belong to a place on the screen, so they
+     * are there only when the numbers are one.
+     */
+    private _positionRow(opts: {
+        step: Step;
+        toggleIcon: string;
+        toggleTip: string;
+        toggleOn: boolean;
+        onToggle: (on: boolean) => void;
+        off: { title: string; values: () => number[] };
+        on: { title: string; subtitle?: string; values?: () => number[] };
+        apply: (values: number[]) => void;
+    }): Adw.ActionRow {
+        const row = new Adw.ActionRow();
+        const state = () => (toggle.get_active() ? opts.on : opts.off);
+
+        const entry = this._numbersEntry(opts.off.values(), values => {
+            opts.apply(values);
+            this._refreshStepTitle(opts.step);
+            this._save();
+        });
+        const point = (): [number, number] => {
+            const parsed = parseNumbers(entry.get_text() ?? '', 2);
+            return [parsed?.[0] ?? 0, parsed?.[1] ?? 0];
+        };
+        const pick = iconButton('find-location-symbolic',
+            _('Go to the spot and click: that position lands here'),
+            () => this._pickPointInto(({ x, y }) => entry.set_text(`${x}, ${y}`)));
+        const show = iconButton('view-reveal-symbolic',
+            _('Flash this position on the screen for a couple of seconds'),
+            () => this._showMarker(...point()));
+
+        const toggle = new Gtk.ToggleButton({
+            icon_name: opts.toggleIcon,
+            tooltip_text: opts.toggleTip,
+            active: opts.toggleOn,
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+
+        const sync = () => {
+            const now = state();
+            const numbers = now.values;
+            row.set_title(now.title);
+            row.set_subtitle(('subtitle' in now && now.subtitle) || '');
+            entry.set_visible(Boolean(numbers));
+            // Untoggled is the state that means a place on the screen, in both
+            // rows: a click's coordinates, a move's destination.
+            const placed = !toggle.get_active();
+            pick.set_visible(placed);
+            show.set_visible(placed);
+            if (numbers) {
+                entry.set_text(numbers().join(', '));
+            }
+        };
+        toggle.connect('toggled', () => {
+            opts.onToggle(toggle.get_active());
+            // In place rather than rebuilt: a rebuild would take the button you
+            // just pressed down with it.
+            sync();
+            this._refreshStepTitle(opts.step);
+            this._save();
+        });
+        sync();
+
+        row.add_suffix(entry);
+        row.add_suffix(pick);
+        row.add_suffix(show);
+        row.add_suffix(toggle);
+        return row;
+    }
 
     /**
      * `defaultExpanded` opens a row the first time it is seen — bodies use it, so
@@ -692,20 +818,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         });
         actions.set_header_suffix(addButton);
 
-        // Two files, because they move for different reasons: the steps are the
-        // work, the settings are the machine they run on.
-        actions.add(this._transferRow(
-            _('Macros'),
-            `${_('The recorded steps')} — ~/${MACROS_FILE}`,
-            () => this._exportDocument(),
-            () => this._importDocument(),
-        ));
-        actions.add(this._transferRow(
-            _('Settings'),
-            `${_('Everything but the macros')} — ~/${SETTINGS_FILE}`,
-            () => this._exportSettings(),
-            () => this._importSettings(),
-        ));
+        actions.add(this._transferRow());
 
         this._macrosPage.add(actions);
         this._macroGroups.push(actions);
@@ -1002,15 +1115,35 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._selectable(addRow, `end:${macro.id}`, macro.id);
         addRow.add_suffix(this._addStepDropdown(macro.body));
         addRow.add_suffix(recordButton);
-        group.add(addRow);
 
         for (const step of macro.body) {
             for (const widget of this._buildStepWidgets(macro, step)) {
                 group.add(widget);
             }
         }
+        // Under the steps, where what it adds will appear: a row saying "the end
+        // of the macro" belongs at the end of the macro.
+        group.add(addRow);
 
         return group;
+    }
+
+    /**
+     * A step's title. Steps that name another macro say its name rather than
+     * its id, so a renamed macro reads correctly everywhere it is referred to.
+     */
+    private _describe(step: Step): string {
+        return describeStep(step, id => this._store.getMacro(id)?.name);
+    }
+
+    /**
+     * The title says what the step does, so a setting that changes that has to
+     * put it right — a click that now goes somewhere else must not still be
+     * headed "Click left @ 100,200". Updated in place: rebuilding would take the
+     * field you are typing in with it.
+     */
+    private _refreshStepTitle(step: Step): void {
+        this._stepRows.get(step.id)?.row.set_title(this._describe(step));
     }
 
     /** "3 steps", "empty" — the same phrasing wherever a body is counted. */
@@ -1034,11 +1167,9 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             // so this line is the one that has to say what is in it.
             parts.push(`${this._countLabel(step.body.length)} — ${_(BRANCH_STYLE.body.hint)}`);
         } else if (step.kind === 'if') {
-            parts.push(`${this._countLabel(step.then.length)} ${_('then')}, ` +
-                `${this._countLabel((step.else ?? []).length)} ${_('else')}`);
-        }
-        if (step.enabled === false) {
-            parts.push(_('disabled'));
+            // No first, in the order the two blocks are drawn below it.
+            parts.push(`${this._countLabel((step.else ?? []).length)} ${_('else')}, ` +
+                `${this._countLabel(step.then.length)} ${_('then')}`);
         }
         return parts.join(' — ');
     }
@@ -1069,7 +1200,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // with settings of their own keep the expander; the rest — a break, a
         // stop — are one line, and clicking them only selects them.
         const fields = this._buildStepFields(macro, step);
-        const props = { title: describeStep(step), subtitle: this._stepSubtitle(step) };
+        const props = { title: this._describe(step), subtitle: this._stepSubtitle(step) };
         const row: Adw.ActionRow | Adw.ExpanderRow = fields.length > 0 || inline
             ? this._expander(stepKey, props, inline && children[0].steps.length > 0)
             : new Adw.ActionRow(props);
@@ -1077,11 +1208,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         const branchRows: Adw.ExpanderRow[] = [];
 
         row.set_margin_start(indent);
-        // A loop holds its body, so switching one off greys out everything in
-        // it as well — which is exactly what a switched-off loop does to it.
-        if (step.enabled === false) {
-            row.add_css_class('dim-label');
-        }
 
         const kindIcon = STEP_ICONS[step.kind];
         const icon = new Gtk.Image({ icon_name: kindIcon, valign: Gtk.Align.CENTER });
@@ -1102,25 +1228,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             container: children.length > 0,
             branchRows,
         });
-
-        const enabled = new Gtk.Switch({
-            active: step.enabled !== false,
-            valign: Gtk.Align.CENTER,
-            tooltip_text: _('Disable without deleting'),
-        });
-        enabled.connect('notify::active', () => {
-            step.enabled = enabled.get_active();
-            // Updated in place rather than rebuilt: a rebuild here would tear
-            // down the switch you just flicked.
-            if (step.enabled) {
-                row.remove_css_class('dim-label');
-            } else {
-                row.add_css_class('dim-label');
-            }
-            row.set_subtitle(this._stepSubtitle(step));
-            this._save();
-        });
-        prefixes.append(enabled);
 
         // A repeat has exactly one setting, so it lives on the row rather than
         // behind a fold: the count, and a toggle for having no count at all.
@@ -1148,7 +1255,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             forever.connect('toggled', () => {
                 step.count = forever.get_active() ? 'forever' : count.get_value_as_int();
                 count.set_visible(!forever.get_active());
-                row.set_title(describeStep(step));
+                row.set_title(this._describe(step));
                 this._save();
             });
             count.connect('value-changed', () => {
@@ -1156,7 +1263,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     return;
                 }
                 step.count = count.get_value_as_int();
-                row.set_title(describeStep(step));
+                row.set_title(this._describe(step));
                 this._save();
             });
             suffixes.append(forever);
@@ -1252,13 +1359,14 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
             addNested.add_suffix(this._addStepDropdown(list.steps));
             addNested.add_suffix(nestedRecord);
-            nested.add_row(addNested);
 
             for (const child of list.steps) {
                 for (const widget of this._buildStepWidgets(macro, child, INDENT_PX)) {
                     nested.add_row(widget);
                 }
             }
+            // Last, because that is where what it adds ends up.
+            nested.add_row(addNested);
         }
 
         return widgets;
@@ -1278,21 +1386,23 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                         step.button = value;
                         rebuild();
                     }));
-                rows.push(comboRow(_('Position'), ['abs', 'current'] as const,
-                    { abs: _('At the coordinates below'), current: _('Wherever the pointer already is') },
-                    step.mode, value => {
-                        step.mode = value;
-                        rebuild();
-                    }));
-                if (step.mode === 'abs') {
-                    rows.push(this._numbersRow(_('Position (x, y)'), [step.x ?? 0, step.y ?? 0],
-                        ([x, y]) => {
-                            step.x = x;
-                            step.y = y;
-                            save();
-                        },
-                        ([x, y]) => this._showMarker(x, y)));
-                }
+                rows.push(this._positionRow({
+                    step,
+                    // The toggle is the whole of the old Position dropdown: on
+                    // means there are no coordinates to have.
+                    toggleIcon: 'input-mouse-symbolic',
+                    toggleTip: _('Click wherever the pointer already is'),
+                    toggleOn: step.mode === 'current',
+                    onToggle: on => {
+                        step.mode = on ? 'current' : 'abs';
+                    },
+                    off: { title: _('Position'), values: () => [step.x ?? 0, step.y ?? 0] },
+                    on: { title: _('Position'), subtitle: _('Wherever the pointer already is') },
+                    apply: ([x, y]) => {
+                        step.x = x;
+                        step.y = y;
+                    },
+                }));
                 rows.push(spinRow(_('Hold (ms)'), step.holdMs ?? 20, 0, 10000, 5, value => {
                     step.holdMs = Math.round(value);
                     save();
@@ -1300,27 +1410,28 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 break;
 
             case 'move':
-                rows.push(comboRow(_('Mode'), ['abs', 'rel'] as const,
-                    { abs: _('Move to a screen position'), rel: _('Move by an offset') },
-                    step.mode, value => {
-                        step.mode = value;
-                        rebuild();
-                    }));
-                if (step.mode === 'abs') {
-                    rows.push(this._numbersRow(_('Position (x, y)'), [step.x ?? 0, step.y ?? 0],
-                        ([x, y]) => {
-                            step.x = x;
-                            step.y = y;
-                            save();
-                        },
-                        ([x, y]) => this._showMarker(x, y)));
-                } else {
-                    rows.push(this._numbersRow(_('Offset (dx, dy)'), [step.dx ?? 0, step.dy ?? 0], ([dx, dy]) => {
-                        step.dx = dx;
-                        step.dy = dy;
-                        save();
-                    }));
-                }
+                rows.push(this._positionRow({
+                    step,
+                    toggleIcon: 'go-jump-symbolic',
+                    toggleTip: _('Move by an offset instead of to a position'),
+                    toggleOn: step.mode === 'rel',
+                    onToggle: on => {
+                        step.mode = on ? 'rel' : 'abs';
+                    },
+                    off: { title: _('Position'), values: () => [step.x ?? 0, step.y ?? 0] },
+                    // An offset is numbers too — they just are not a place, so
+                    // there is nothing to point at or flash on the screen.
+                    on: { title: _('Offset'), values: () => [step.dx ?? 0, step.dy ?? 0] },
+                    apply: ([a, b]) => {
+                        if (step.mode === 'rel') {
+                            step.dx = a;
+                            step.dy = b;
+                        } else {
+                            step.x = a;
+                            step.y = b;
+                        }
+                    },
+                }));
                 break;
 
             case 'scroll':
@@ -1389,6 +1500,33 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     this._saveAndRebuild();
                 }, condKey));
                 break;
+
+            case 'start':
+            case 'stop': {
+                // Every macro but this one, and "this one" as the first choice —
+                // a start pointing here is a restart, a stop pointing here ends
+                // the run, and both are worth having without picking a name.
+                const others = this._store.macros.filter(other => other.id !== macro.id);
+                // A macro that has since been deleted is not a choice any more,
+                // so the step falls back to meaning itself rather than naming a
+                // macro that is not there.
+                if (step.macro && !others.some(other => other.id === step.macro)) {
+                    step.macro = '';
+                }
+                const options = ['', ...others.map(other => other.id)];
+                const labels: Record<string, string> = {
+                    '': step.kind === 'start' ? _('This macro, from the top') : _('This macro'),
+                };
+                for (const other of others) {
+                    labels[other.id] = other.name;
+                }
+                rows.push(comboRow(_('Which macro'), options, labels, step.macro ?? '', value => {
+                    step.macro = value;
+                    // The title says which macro, so it has to be redrawn.
+                    rebuild();
+                }));
+                break;
+            }
 
             default:
                 break;
@@ -1472,7 +1610,10 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                         condition.h = Math.max(1, h);
                         rebuild();
                     },
-                    ([x, y, w, h]) => this._showMarker(x, y, Math.max(1, w), Math.max(1, h))));
+                    ([x, y, w, h]) => this._showMarker(x, y, Math.max(1, w), Math.max(1, h)),
+                    // The size stays: what you are pointing at is which pixel to
+                    // look at, not how big a patch of it to take.
+                    (x, y, [, , w, h]) => [x, y, w, h]));
                 rows.push(entryRow(_('Colour (#rrggbb)'), condition.color, text => {
                     condition.color = text.trim();
                     save();
@@ -1557,45 +1698,128 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     // --- import / export ---------------------------------------------------
 
-    /** An Export / Import pair over one file. */
-    private _transferRow(
-        title: string, subtitle: string, onExport: () => void, onImport: () => void,
-    ): Adw.ActionRow {
-        const row = new Adw.ActionRow({ title, subtitle });
-        const exportButton = new Gtk.Button({ label: _('Export'), valign: Gtk.Align.CENTER });
-        exportButton.connect('clicked', onExport);
-        const importButton = new Gtk.Button({ label: _('Import'), valign: Gtk.Align.CENTER });
-        importButton.connect('clicked', onImport);
-        row.add_suffix(exportButton);
-        row.add_suffix(importButton);
+    /**
+     * Export and Import over both files, on one row. Each is a menu rather than
+     * a button because there are two things to move — the steps, and the machine
+     * they run on — and four buttons in a row is a row nobody reads.
+     */
+    private _transferRow(): Adw.ActionRow {
+        const row = new Adw.ActionRow({
+            title: _('Backup'),
+            subtitle: _('Macros are the steps; settings are everything else'),
+        });
+        row.add_suffix(this._transferButton(_('Export'), [
+            { label: _('Macros'), run: () => this._exportDocument() },
+            { label: _('Settings'), run: () => this._exportSettings() },
+        ]));
+        row.add_suffix(this._transferButton(_('Import'), [
+            { label: _('Macros'), run: () => this._importDocument() },
+            { label: _('Settings'), run: () => this._importSettings() },
+        ]));
         return row;
     }
 
-    private _exportDocument(): void {
-        const path = homeFile(MACROS_FILE);
-        const json = stringifyDocument(this._store.document);
-        try {
-            GLib.file_set_contents(path, JSON.stringify(JSON.parse(json), null, 2));
-            this._toast(`Exported ${this._store.macros.length} macros to ${path}`);
-        } catch (error) {
-            this._toast(`Export failed: ${(error as Error).message}`);
+    private _transferButton(
+        label: string,
+        choices: { label: string; run: () => void }[],
+    ): Gtk.MenuButton {
+        const box = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 0,
+            margin_top: 6,
+            margin_bottom: 6,
+            margin_start: 6,
+            margin_end: 6,
+        });
+        const popover = new Gtk.Popover({ child: box });
+        for (const choice of choices) {
+            const button = new Gtk.Button({ label: choice.label, css_classes: ['flat'] });
+            button.connect('clicked', () => {
+                // Down before the file dialog goes up, or the popover is left
+                // hanging over it.
+                popover.popdown();
+                choice.run();
+            });
+            box.append(button);
+        }
+        return new Gtk.MenuButton({ label, popover, valign: Gtk.Align.CENTER });
+    }
+
+    /**
+     * Ask for a file, and hand its path back. The window is the parent, so the
+     * dialog is modal to the editor rather than to the whole session; cancelling
+     * throws out of `*_finish`, which is not a failure and says nothing.
+     */
+    private _chooseFile(
+        mode: 'open' | 'save',
+        suggestedName: string,
+        onChosen: (path: string) => void,
+    ): void {
+        const json = new Gtk.FileFilter({ name: _('JSON files') });
+        json.add_suffix('json');
+        const any = new Gtk.FileFilter({ name: _('All files') });
+        any.add_pattern('*');
+        const filters = new Gio.ListStore({ item_type: Gtk.FileFilter.$gtype });
+        filters.append(json);
+        filters.append(any);
+
+        const dialog = new Gtk.FileDialog({
+            title: mode === 'save' ? _('Export to…') : _('Import from…'),
+            modal: true,
+            filters,
+            default_filter: json,
+            initial_folder: Gio.File.new_for_path(GLib.get_home_dir()),
+        });
+        if (mode === 'save') {
+            dialog.set_initial_name(suggestedName);
+        }
+
+        const done = (result: Gio.AsyncResult) => {
+            let file: Gio.File | null = null;
+            try {
+                file = mode === 'save' ? dialog.save_finish(result) : dialog.open_finish(result);
+            } catch {
+                return;   // dismissed
+            }
+            const path = file?.get_path();
+            if (path) {
+                onChosen(path);
+            }
+        };
+        if (mode === 'save') {
+            dialog.save(this._window ?? null, null, (_source, result) => done(result));
+        } else {
+            dialog.open(this._window ?? null, null, (_source, result) => done(result));
         }
     }
 
-    private _importDocument(): void {
-        const path = homeFile(MACROS_FILE);
-        try {
-            const [ok, contents] = GLib.file_get_contents(path);
-            if (!ok) {
-                throw new Error('could not read the file');
+    private _exportDocument(): void {
+        this._chooseFile('save', MACROS_FILE, path => {
+            const json = stringifyDocument(this._store.document);
+            try {
+                GLib.file_set_contents(path, JSON.stringify(JSON.parse(json), null, 2));
+                this._toast(`Exported ${this._store.macros.length} macros to ${path}`);
+            } catch (error) {
+                this._toast(`Export failed: ${(error as Error).message}`);
             }
-            const doc = parseDocument(new TextDecoder().decode(contents));
-            this._store.replaceDocument(doc.macros.length > 0 ? doc : emptyDocument());
-            this._rebuildMacros();
-            this._toast(`Imported ${doc.macros.length} macros from ${path}`);
-        } catch (error) {
-            this._toast(`Import failed: ${(error as Error).message}`);
-        }
+        });
+    }
+
+    private _importDocument(): void {
+        this._chooseFile('open', MACROS_FILE, path => {
+            try {
+                const [ok, contents] = GLib.file_get_contents(path);
+                if (!ok) {
+                    throw new Error('could not read the file');
+                }
+                const doc = parseDocument(new TextDecoder().decode(contents));
+                this._store.replaceDocument(doc.macros.length > 0 ? doc : emptyDocument());
+                this._rebuildMacros();
+                this._toast(`Imported ${doc.macros.length} macros from ${path}`);
+            } catch (error) {
+                this._toast(`Import failed: ${(error as Error).message}`);
+            }
+        });
     }
 
     /**
@@ -1605,24 +1829,28 @@ export default class ClickmatePreferences extends ExtensionPreferences {
      * back in, so a hand-edited file cannot put a bad value into dconf.
      */
     private _exportSettings(): void {
-        const path = homeFile(SETTINGS_FILE);
-        const values: Record<string, string> = {};
-        for (const key of this._settings.settings_schema.list_keys()) {
-            if (isTransferableKey(key)) {
-                values[key] = this._settings.get_value(key).print(false);
+        this._chooseFile('save', SETTINGS_FILE, path => {
+            const values: Record<string, string> = {};
+            for (const key of this._settings.settings_schema.list_keys()) {
+                if (isTransferableKey(key)) {
+                    values[key] = this._settings.get_value(key).print(false);
+                }
             }
-        }
-        try {
-            const file = { type: 'clickmate-settings', version: 1, settings: values };
-            GLib.file_set_contents(path, `${JSON.stringify(file, null, 2)}\n`);
-            this._toast(`Exported ${Object.keys(values).length} settings to ${path}`);
-        } catch (error) {
-            this._toast(`Settings export failed: ${(error as Error).message}`);
-        }
+            try {
+                const file = { type: 'clickmate-settings', version: 1, settings: values };
+                GLib.file_set_contents(path, `${JSON.stringify(file, null, 2)}\n`);
+                this._toast(`Exported ${Object.keys(values).length} settings to ${path}`);
+            } catch (error) {
+                this._toast(`Settings export failed: ${(error as Error).message}`);
+            }
+        });
     }
 
     private _importSettings(): void {
-        const path = homeFile(SETTINGS_FILE);
+        this._chooseFile('open', SETTINGS_FILE, path => this._applySettingsFile(path));
+    }
+
+    private _applySettingsFile(path: string): void {
         try {
             const [ok, contents] = GLib.file_get_contents(path);
             if (!ok) {
@@ -1760,7 +1988,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             minimize: step.kind !== 'wait',
             onResult: answer => {
                 if (!answer.ok) {
-                    this._toast(`${describeStep(step)}: ${answer.message ?? _('it did not run')}`);
+                    this._toast(`${this._describe(step)}: ${answer.message ?? _('it did not run')}`);
                     return;
                 }
                 // Stepping through a macro: the insertion point moves past what
@@ -1793,6 +2021,24 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
     /** Drag a rectangle on the real screen to set an LLM condition's area. */
+    /**
+     * Get out of the way, wait for a click on the real screen, and hand back
+     * where it landed. The window comes back either way; a pick that caught
+     * nothing says so rather than leaving the field looking picked.
+     */
+    private _pickPointInto(onPoint: (point: { x: number; y: number }) => void): void {
+        this._askShell('pick-point', {}, {
+            minimize: true,
+            onResult: answer => {
+                if (answer.ok && typeof answer.x === 'number' && typeof answer.y === 'number') {
+                    onPoint({ x: answer.x, y: answer.y });
+                } else {
+                    this._toast(`${_('nothing was picked')}: ${answer.message ?? _('it timed out')}`);
+                }
+            },
+        });
+    }
+
     private _pickRegionFor(condition: LlmCondition): void {
         this._askShell('pick-region', {}, {
             minimize: true,

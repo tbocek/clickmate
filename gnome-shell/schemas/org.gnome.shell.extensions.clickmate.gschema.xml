@@ -70,6 +70,18 @@
             <description>Internal: the rectangle the shell captured, as JSON</description>
         </key>
 
+        <key name="pick-point-request" type="s">
+            <default>''</default>
+            <summary>Point pick request</summary>
+            <description>Internal: asks the shell to wait for a click and report where it landed</description>
+        </key>
+
+        <key name="pick-point-result" type="s">
+            <default>''</default>
+            <summary>Point pick result</summary>
+            <description>Internal: the position the shell captured, as JSON</description>
+        </key>
+
         <key name="capture-step-request" type="s">
             <default>''</default>
             <summary>Capture request</summary>

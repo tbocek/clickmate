@@ -6,7 +6,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import { ConditionEvaluator } from './conditions.js';
-import { DaemonClient } from './daemon.js';
+import { DaemonClient, type Playback } from './daemon.js';
 import {
     BUTTON_CODES,
     EV_KEY,
@@ -59,6 +59,14 @@ export interface RunnerCallbacks {
      * push, so nothing has to be wired into the input path to answer it.
      */
     shouldPause?: () => boolean;
+    /**
+     * Start or stop another macro, for the steps that do that. Returns a reason
+     * when it could not, which fails the step: a macro that was renamed out of
+     * existence must not leave the rest of the run quietly going.
+     */
+    onMacroControl?: (action: 'start' | 'stop', macroId: string) => string | null;
+    /** Names a macro for `describeStep`, so those steps read as what they poke. */
+    macroName?: (macroId: string) => string | undefined;
 }
 
 // Without a flattened acceleration curve a move may need a few more passes;
@@ -82,6 +90,8 @@ export class MacroRunner {
     private _path: RunningStep[] = [];
     private _failedAt = '';
     private _failedStepId = '';
+    /** Which macro is running, so a step naming "this one" can name it. */
+    private _macroId = '';
     /**
      * Ids from the macro body down to the step this run starts at, outermost
      * first. Consumed on the way down and empty for the rest of the run, so
@@ -170,6 +180,7 @@ export class MacroRunner {
         this._path = [];
         this._failedAt = '';
         this._failedStepId = '';
+        this._macroId = macro.id;
         this._resume = resumeAt ? pathToStep(macro.body, resumeAt) : [];
         this._callbacks.onRunningChanged?.(true);
 
@@ -177,7 +188,7 @@ export class MacroRunner {
             ? findStep(macro.body, resumeAt)?.step
             : undefined;
         this._status(from
-            ? `Running “${macro.name}” from ${describeStep(from)}`
+            ? `Running “${macro.name}” from ${describeStep(from, this._callbacks.macroName)}`
             : `Running “${macro.name}”`);
 
         let reason: FinishReason = 'done';
@@ -233,13 +244,13 @@ export class MacroRunner {
         let result: { ok: boolean; message: string };
         try {
             await this._runStep(step);
-            result = { ok: true, message: `Ran: ${describeStep(step)}` };
+            result = { ok: true, message: `Ran: ${describeStep(step, this._callbacks.macroName)}` };
             this._status(result.message);
         } catch (error) {
             result = { ok: false, message: (error as Error).message };
             this._status(`Failed: ${result.message}`);
             reportProblem('Step', result.message, {
-                where: describeStep(step),
+                where: describeStep(step, this._callbacks.macroName),
                 error: error as Error,
             });
         } finally {
@@ -325,13 +336,9 @@ export class MacroRunner {
         if (this._cancelled) {
             return 'stop';
         }
-        if (step.enabled === false) {
-            return 'normal';
-        }
-
         // A container stays on the path for as long as its body runs, so the
         // editor can mark the loop you are in as well as the step inside it.
-        this._path.push({ id: step.id, label: describeStep(step) });
+        this._path.push({ id: step.id, label: describeStep(step, this._callbacks.macroName) });
         this._callbacks.onStepsChanged?.([...this._path]);
         try {
             return await this._execute(step, depth);
@@ -423,47 +430,86 @@ export class MacroRunner {
                 return 'break';
             case 'continue':
                 return 'continue';
+
             case 'stop':
-                return 'stop';
+                // Stopping ourselves is the ordinary end of a run, not a message
+                // to anyone: unwind from here the way this step always has.
+                if (!step.macro || step.macro === this._macroId) {
+                    return 'stop';
+                }
+                this._control('stop', step.macro);
+                return 'normal';
+
+            case 'start':
+                // Including ourselves — the shell ends this run and begins the
+                // macro again from the top, so nothing after this step runs.
+                this._control('start', step.macro || this._macroId);
+                return 'normal';
+        }
+    }
+
+    /**
+     * Ask the shell to start or stop another macro. Runners know nothing about
+     * each other — one macro to a runner — so this goes out to whoever is
+     * holding them, and comes back with what to say if it could not be done.
+     */
+    private _control(action: 'start' | 'stop', macroId: string): void {
+        const problem = this._callbacks.onMacroControl?.(action, macroId);
+        if (problem) {
+            throw new Error(problem);
         }
     }
 
     // --- primitives --------------------------------------------------------
 
-    private async _play(events: RawEvent[]): Promise<void> {
+    /**
+     * `via` is which right to play this goes out under: the daemon's queue by
+     * default, or the lease held by a walk to a fixed position.
+     */
+    private async _play(events: RawEvent[], via: Playback = this._daemon): Promise<void> {
         if (this._cancelled || events.length === 0) {
             return;
         }
-        const result = await this._daemon.play(events);
+        const result = await via.play(events);
         if (result.aborted) {
             this._cancelled = true;
         }
     }
 
     private async _doClick(step: ClickStep): Promise<void> {
-        if (step.mode === 'abs') {
-            await this._moveAbs(step.x ?? 0, step.y ?? 0);
+        const code = BUTTON_CODES[step.button] ?? BUTTON_CODES.left;
+        const hold = Math.max(0, step.holdMs ?? 20) * 1000;
+        const press = (via?: Playback) => this._play([
+            { dt: 0, type: EV_KEY, code, value: 1 },
+            { dt: hold, type: EV_KEY, code, value: 0 },
+        ], via);
+
+        if (step.mode !== 'abs') {
+            await press();
+            return;
+        }
+        // Getting there and clicking are one thing: a click that lands where the
+        // walk left off is the whole point, and another macro nudging the pointer
+        // between the two would land it somewhere else entirely.
+        await this._daemon.exclusive(async lease => {
+            await this._moveAbs(step.x ?? 0, step.y ?? 0, lease);
             if (this._cancelled) {
                 return;
             }
-        }
-        const code = BUTTON_CODES[step.button] ?? BUTTON_CODES.left;
-        const hold = Math.max(0, step.holdMs ?? 20) * 1000;
-        await this._play([
-            { dt: 0, type: EV_KEY, code, value: 1 },
-            { dt: hold, type: EV_KEY, code, value: 0 },
-        ]);
+            await press(lease);
+        });
     }
 
     private async _doMove(step: MoveStep): Promise<void> {
         if (step.mode === 'abs') {
-            await this._moveAbs(step.x ?? 0, step.y ?? 0);
+            // Only the walk to hold together here — there is nothing after it.
+            await this._daemon.exclusive(lease => this._moveAbs(step.x ?? 0, step.y ?? 0, lease));
             return;
         }
         await this._playRelative(step.dx ?? 0, step.dy ?? 0);
     }
 
-    private async _playRelative(dx: number, dy: number): Promise<void> {
+    private async _playRelative(dx: number, dy: number, via?: Playback): Promise<void> {
         const events: RawEvent[] = [];
         if (dx) {
             events.push({ dt: 0, type: EV_REL, code: REL_X, value: Math.round(dx), syn: dy === 0 });
@@ -471,15 +517,21 @@ export class MacroRunner {
         if (dy) {
             events.push({ dt: 0, type: EV_REL, code: REL_Y, value: Math.round(dy), syn: true });
         }
-        await this._play(events);
+        await this._play(events, via);
     }
 
     /**
      * uinput only speaks relative motion, so walk the pointer to the target and
-     * verify with global.get_pointer() after each nudge. Converges in one step
-     * regardless of what the acceleration curve does to a raw delta.
+     * verify with global.get_pointer() after each nudge. Converges whatever the
+     * acceleration curve does to a raw delta.
+     *
+     * Every pass measures the pointer, so nothing else may move it in between:
+     * the caller holds the daemon for the whole walk and this plays through that
+     * lease. The pointer is still shared with the person at the desk — a hand on
+     * the mouse mid-walk is answered by the next pass, which reads where it
+     * really is rather than where the last nudge aimed.
      */
-    private async _moveAbs(x: number, y: number): Promise<void> {
+    private async _moveAbs(x: number, y: number, via?: Playback): Promise<void> {
         for (let i = 0; i < MAX_MOVE_ITERATIONS; i++) {
             if (this._cancelled) {
                 return;
@@ -490,8 +542,16 @@ export class MacroRunner {
             if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) {
                 return;
             }
-            await this._playRelative(dx, dy);
+            await this._playRelative(dx, dy, via);
             await this._sleep(6);
+        }
+
+        // The loop checks before nudging, so the last nudge of all would go
+        // unmeasured: without this, a walk that arrived on its final pass is
+        // reported as "stopped at 4000,0 instead of 4000,0".
+        const [ex, ey] = global.get_pointer();
+        if (this._cancelled || (Math.abs(x - ex) <= 1 && Math.abs(y - ey) <= 1)) {
+            return;
         }
 
         if (!this._warnedAboutMotion) {

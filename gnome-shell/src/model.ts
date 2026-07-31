@@ -88,7 +88,6 @@ export interface RawEvent {
 
 interface StepCommon {
     id: string;
-    enabled?: boolean;
 }
 
 export type ClickStep = StepCommon & {
@@ -159,7 +158,20 @@ export type IfStep = StepCommon & {
 };
 
 export type FlowStep = StepCommon & {
-    kind: 'break' | 'continue' | 'stop';
+    kind: 'break' | 'continue';
+};
+
+/**
+ * Reaching out of this macro into another one, by id. Empty means this macro,
+ * so `stop` on its own is the plain "stop here" it has always been and `start`
+ * on its own is "begin again from the top".
+ *
+ * `start` on a macro that is already running restarts it: there is one run per
+ * macro, and asking for it while it is going can only mean from the beginning.
+ */
+export type MacroStep = StepCommon & {
+    kind: 'start' | 'stop';
+    macro?: string;
 };
 
 export type Step =
@@ -171,7 +183,8 @@ export type Step =
     | WaitStep
     | LoopStep
     | IfStep
-    | FlowStep;
+    | FlowStep
+    | MacroStep;
 
 export type StepKind = Step['kind'];
 
@@ -262,8 +275,12 @@ export function newStep(kind: StepKind): Step {
             return { id, kind: 'if', cond: newCondition('color'), then: [], else: [] };
         case 'break':
         case 'continue':
-        case 'stop':
             return { id, kind };
+        case 'start':
+        case 'stop':
+            // Empty is this macro: a stop that stops the run it is in, and a
+            // start that begins it again. Pick another one and it reaches over.
+            return { id, kind, macro: '' };
     }
 }
 
@@ -276,9 +293,13 @@ export function childLists(step: Step): { key: string; steps: Step[] }[] {
             // Materialise the else branch: callers push into these arrays, and a
             // `?? []` fallback would silently swallow whatever they add.
             step.else ??= [];
+            // No before Yes, which is the order the editor draws them in and so
+            // the order everything that talks about "the first branch" means:
+            // where a step lands when it moves down into an `if`, and which
+            // branch an empty one takes a new step into.
             return [
-                { key: 'then', steps: step.then },
                 { key: 'else', steps: step.else },
+                { key: 'then', steps: step.then },
             ];
         default:
             return [];
@@ -496,9 +517,13 @@ export function insertStep(list: Step[], step: Step, afterId?: string | null): v
         list.push(step);
         return;
     }
-    const children = childLists(loc.step);
-    if (children.length > 0 && children[0].steps.length === 0) {
-        children[0].steps.push(step);
+    // Named rather than taken from childLists: that order is the editor's, and
+    // an `if` draws No first while the branch you mean by "inside it" is Yes.
+    const inside = loc.step.kind === 'loop' ? loc.step.body
+        : loc.step.kind === 'if' ? loc.step.then
+        : null;
+    if (inside && inside.length === 0) {
+        inside.push(step);
         return;
     }
     loc.list.splice(loc.index + 1, 0, step);
@@ -849,6 +874,11 @@ export function parseDocument(json: string): MacroDocument {
                 if (!loc.step.id) {
                     loc.step.id = newId();
                 }
+                // Steps used to carry a switch of their own. A macro is the
+                // thing you switch on and off now, so the flag is dropped here
+                // rather than left behind to mean nothing: a step that is in a
+                // macro runs when that macro does.
+                delete (loc.step as { enabled?: boolean }).enabled;
             });
             fixed.body = dropRawSteps(migrateGuards(migrateGates(migrateLoops(fixed.body))));
             return fixed;
@@ -924,7 +954,12 @@ function formatMs(ms: number): string {
     return `${ms}ms`;
 }
 
-export function describeStep(step: Step): string {
+/**
+ * `macroName` resolves the macro a `start` or `stop` step points at. Without it
+ * those read as "another macro": the runner has no document to look in, and its
+ * breadcrumb is about where the run is, not which macro it just poked.
+ */
+export function describeStep(step: Step, macroName?: (id: string) => string | undefined): string {
     switch (step.kind) {
         case 'click':
             return step.mode === 'abs'
@@ -957,8 +992,15 @@ export function describeStep(step: Step): string {
             return 'Break out of the loop';
         case 'continue':
             return 'Skip to the next iteration';
-        case 'stop':
-            return 'Stop the macro';
+        case 'start':
+        case 'stop': {
+            const verb = step.kind === 'start' ? 'Start' : 'Stop';
+            if (!step.macro) {
+                return step.kind === 'start' ? 'Start this macro again' : 'Stop the macro';
+            }
+            const name = macroName?.(step.macro);
+            return name ? `${verb} “${name}”` : `${verb} another macro`;
+        }
     }
 }
 
@@ -968,7 +1010,7 @@ export function describeStep(step: Step): string {
  */
 export const AUTHORABLE_STEP_KINDS: StepKind[] = [
     'click', 'move', 'scroll', 'key', 'text', 'wait',
-    'loop', 'if', 'break', 'continue', 'stop',
+    'loop', 'if', 'break', 'continue', 'start', 'stop',
 ];
 
 export const STEP_KIND_LABELS: Record<StepKind, string> = {
@@ -982,7 +1024,8 @@ export const STEP_KIND_LABELS: Record<StepKind, string> = {
     if: 'If / else',
     break: 'Break',
     continue: 'Continue',
-    stop: 'Stop',
+    start: 'Start a macro',
+    stop: 'Stop a macro',
 };
 
 export const CONDITION_TYPE_LABELS: Record<ConditionType, string> = {

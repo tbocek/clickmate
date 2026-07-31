@@ -34,8 +34,8 @@ repeat forever:
   clicks carry their absolute screen position, pointer movement becomes a move
   step wherever it comes to rest, and idle gaps become waits.
 - **A full tree editor in preferences** — every step and condition, nested
-  loops and `and`/`or`/`not`, plain-language summaries, enable/disable so you can
-  bisect a macro instead of deleting from it, and JSON import/export.
+  loops and `and`/`or`/`not`, plain-language summaries, and JSON import/export
+  to a file you choose.
 - **A panel popup that stays out of the way** — a switch, a stop, what is
   running, and a way into the settings.
 - **Several macros at once** — a switch per macro says which ones **Run**
@@ -66,7 +66,14 @@ uinput only speaks *relative* motion. To click at a fixed coordinate the extensi
 nudges the pointer, re-reads `global.get_pointer()` and repeats until it is within
 a pixel — up to a dozen passes, each one daemon round trip. It converges whatever
 the acceleration curve is doing, which is why nothing has to touch your mouse
-settings to make it work.
+settings to make it work. With the acceleration profile left on `default` the
+compositor scales each nudge, so the walk takes several passes and you can watch
+it happen; `flat` lands it in one.
+
+The walk and the click that follows it hold the daemon between them
+(`DaemonClient.exclusive`), so nothing else plays in the middle of a
+measurement — the pointer being read back has to be the one the last nudge
+moved.
 
 If the target application grabs the pointer — a game with mouse-look — the
 reported position never changes and absolute moves cannot converge. The status
@@ -193,9 +200,12 @@ Each macro has a switch next to its name in the editor, and **Run** starts every
 macro that is switched on — all of them, at the same time. They are independent:
 each keeps its own place in its own steps, and one finishing or failing does not
 touch the others. What they share is the machine, so their steps interleave,
-taking turns at the pointer and keyboard one step each. Two macros both moving
-the mouse will fight over it; two watching different corners of the screen and
-clicking different buttons will not.
+taking turns at the pointer and keyboard one step each. A step is the unit: a
+click at a fixed position holds the pointer for its whole walk *and* the click
+at the end of it, so no other macro can land a nudge in the middle and leave it
+clicking somewhere else. Two macros both moving the mouse still take it in turns
+and will end up somewhere neither meant; two watching different corners of the
+screen and clicking different buttons will not.
 
 Beside the switch is a **▶** that runs that one macro, on or off, right now —
 and turns into a **■** while it runs, which is also how the editor shows you
@@ -203,6 +213,23 @@ which macros are going without your having to look at the panel.
 
 A macro that is switched off is still yours to edit, record into and step
 through; it just does not join in when you press Run.
+
+The macro is the only thing there is a switch for. Steps have none: a step that
+is in a macro runs when that macro runs. Something you want out of the way for
+now is either deleted or put behind an `if` that says when it applies. (Steps
+used to carry a switch each; documents saved with one lose it on first load, and
+those steps run.)
+
+Macros can also drive each other. A `start` step names a macro and starts it; if
+that macro is already going it is stopped first and begins again from the top,
+which is the whole point — a watcher that notices the screen has gone back to its
+starting state can put the macro that works it back at the beginning. A `stop`
+step names one and ends it. Both offer **This macro** as the first choice, so a
+`start` with nothing named is "go round again from the top" and a `stop` with
+nothing named ends the run it is in, the way a `break` ends a loop. Delete a
+macro something points at and the step falls back to meaning this one next time
+the editor draws it; reach it in a run before that and the run stops with an
+error rather than carrying on quietly.
 
 ### Pause, continue, stop
 
@@ -256,8 +283,16 @@ Between two sessions the mouse gets used for other things, and moving it back to
 that spot is not a step worth keeping, so it is not recorded. Anywhere else is,
 at its true screen position — coordinates are never shifted.
 
+An `if` draws its **No** block above its **Yes** block. The failure case is the
+one you go looking for — the branch that says what happens when the screen is not
+what you hoped — and putting it first means it is not buried under a `then` that
+has grown. It changes nothing about the run: the condition is still asked once
+and the matching branch still runs.
+
 Steps are added from the **Add a step…** dropdown, which is also the button:
 picking a kind adds it there, at the end of whichever list the dropdown sits in.
+The row it sits on is the last row of that list, under the steps, because that is
+where what it adds appears.
 Next to it, **Record one** captures a single action, which is the quickest way
 to fill in coordinates: the window gets out of the way, and the next click you
 make becomes a `click` step at that position. If you move the pointer and hold
@@ -277,17 +312,42 @@ wherever the selection started out.
 **Move up** and **Move down** treat the editor as what you see. A folded loop is
 one card, so a step passes it in a single press; an open one is a place with an
 inside, so the same press moves the step into it — in at the top coming down, in
-at the bottom coming up. An `if` is entered by the side you arrive from: `then`
-from above, `else` from below, skipping either if it is folded shut. Pressing on
+at the bottom coming up. An `if` is entered by the side you arrive from, in the
+order the two blocks are drawn: **No** from above, **Yes** from below, skipping
+either if it is folded shut. Pressing on
 past the end of a body climbs back out around the loop, so nothing that moved in
 is stuck there.
 
 Coordinates are single fields — `100, 200` for a point, `10, 20, 40, 40` for an
 area — each with a **Show** button that flashes a red X (or an outline) at that
 spot on the real screen for a couple of seconds, so you can check a number
-without running anything. Screen areas for `llm` conditions can also be chosen
-with **Pick area…**, which drops the window out of the way and lets you drag a
-rectangle over the screen.
+without running anything. Next to it, **Pick** fills the field by pointing: the
+window gets out of the way, you click where you mean, and the position lands in
+the field — the same gesture as **Record one**, without adding a step, which is
+how you correct a coordinate that has moved. On an area it moves the corner and
+leaves the size alone. A pick that catches nothing before it times out says so
+and leaves the field as it was. A step's title follows its coordinates, so a
+click that now goes somewhere else says where.
+
+Where a click or a move goes is one row: the numbers, **Pick**, **Show**, and a
+button for not using coordinates at all. On a click that button means "wherever
+the pointer already is", and the numbers go away with it; on a move it means "by
+this much" rather than "to here", and the numbers stay but stop being a place —
+so **Pick** and **Show**, which are about a spot on the screen, go instead. It
+used to be a dropdown naming the mode with the coordinates on a second row
+underneath: a line of prose and a line of numbers to say one thing.
+
+Screen areas for `llm` conditions can also be chosen with **Pick area…**, which
+drops the window out of the way and lets you drag a rectangle over the screen.
+
+At the top of the Macros page, **Backup** has an **Export** and an **Import**,
+each offering **Macros** or **Settings** — two files, because they move for
+different reasons: the steps are the work, the settings are the machine they run
+on. Both open a file chooser, so where a backup goes and which one comes back is
+yours to say; the names `clickmate-macros.json` and `clickmate-settings.json` are
+only what the save dialog starts with. Importing macros replaces every macro you
+have. Importing settings skips anything the schema does not know or will not
+take, and says which keys it ignored.
 
 ### Daemon HTTP API
 

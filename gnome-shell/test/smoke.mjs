@@ -91,18 +91,20 @@ const open = () => true;
     const m = newMacro('m');
     const before = newStep('click'), gate = newStep('if'), after = newStep('wait');
     m.body.push(before, gate, after);
-    const thenOnly = (id, key) => key === 'then';
+    const elseOnly = (id, key) => key === 'else';
 
-    check('moving down enters then',
+    // The editor draws No above Yes, so that is the order a step travels
+    // through them: down from above lands in No, up from below lands in Yes.
+    check('moving down enters the No branch',
           moveStepNested(m.body, before.id, 1, open) &&
-          gate.then.map(s => s.id).join() === before.id);
-    check('moving up enters else',
+          gate.else.map(s => s.id).join() === before.id);
+    check('moving up enters the Yes branch',
           moveStepNested(m.body, after.id, -1, open) &&
-          gate.else.map(s => s.id).join() === after.id);
+          gate.then.map(s => s.id).join() === after.id);
     moveStepNested(m.body, after.id, 1, open);   // back out below
-    check('a folded else is not entered from below',
-          moveStepNested(m.body, after.id, -1, thenOnly) &&
-          gate.then.map(s => s.id).join() === [before.id, after.id].join());
+    check('a folded Yes is passed over from below',
+          moveStepNested(m.body, after.id, -1, elseOnly) &&
+          gate.else.map(s => s.id).join() === [before.id, after.id].join());
 }
 
 {

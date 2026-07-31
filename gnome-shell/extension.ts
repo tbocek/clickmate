@@ -58,6 +58,12 @@ export default class ClickmateExtension extends Extension {
      * keyboard and one daemon between them.
      */
     private _runners = new Map<string, MacroRunner>();
+    /**
+     * Macros a `start` step asked for while they were already running. A run
+     * cannot begin before the last one has unwound, so the id waits here until
+     * that run reports itself finished.
+     */
+    private _restarting = new Set<string>();
     private _recorder?: Recorder;
     private _popup?: MacroPopup;
     private _indicator?: PanelMenu.Button;
@@ -152,6 +158,7 @@ export default class ClickmateExtension extends Extension {
             this._settings.set_string('recording', '');
         }
         this._recorder?.cancel();
+        this._restarting.clear();
         for (const runner of this._runners.values()) {
             runner.stop();
         }
@@ -371,6 +378,8 @@ export default class ClickmateExtension extends Extension {
                 onStepsChanged: path => this._onStepsChanged(macroId, path),
                 shouldPause: () => this._isPointerOverMenu(),
                 onFinished: (reason, error) => this._onFinished(macroId, reason, error),
+                onMacroControl: (action, target) => this._macroControl(action, target),
+                macroName: id => this._store?.getMacro(id)?.name,
             });
         this._runners.set(macroId, runner);
         return runner;
@@ -395,6 +404,13 @@ export default class ClickmateExtension extends Extension {
         }
         // 'stopped' leaves the key alone — pause has just written the step to
         // it, and Stop has just cleared it.
+
+        // A start step asked for a macro that was already running: it had to end
+        // before it could begin again, and it has just ended. `_running` is
+        // already false by the time we are called, so this starts cleanly.
+        if (this._restarting.delete(macroId) && macro) {
+            void this._runners.get(macroId)?.run(macro, '');
+        }
 
         // The runner has already filed the problem; this is only the
         // interruption, for the case where the menu is closed.
@@ -449,6 +465,39 @@ export default class ClickmateExtension extends Extension {
         }
     }
 
+    /**
+     * A `start` or `stop` step reaching into another macro. Returns a reason
+     * when it could not, which the runner turns into a failed step.
+     *
+     * Start means start: a macro already going is ended and begun again from the
+     * top, because there is one run per macro and asking for it while it runs
+     * can only mean from the beginning. That includes a macro restarting itself,
+     * which is how a watcher gets back to its first check.
+     */
+    private _macroControl(action: 'start' | 'stop', macroId: string): string | null {
+        const macro = this._store?.getMacro(macroId);
+        if (!macro) {
+            return 'that macro is no longer there';
+        }
+        const runner = this._runnerFor(macroId);
+        if (!runner) {
+            return 'the extension is not ready yet';
+        }
+        if (runner.running) {
+            // Only the last one going tells the daemon to let go: that request
+            // is global, and would cut into whatever else is playing.
+            const alone = this._runningMacros().length === 1;
+            if (action === 'start') {
+                this._restarting.add(macroId);
+            }
+            runner.stop(alone);
+        } else if (action === 'start') {
+            void runner.run(macro, '');
+        }
+        this._popup?.refresh();
+        return null;
+    }
+
     /** Start one macro, from the selected step when the selection is in it. */
     private _runMacro(macro: Macro): boolean {
         const runner = this._runnerFor(macro.id);
@@ -461,6 +510,8 @@ export default class ClickmateExtension extends Extension {
 
     /** Halt everything, remembering where to continue from where that is one place. */
     private _pauseAll(): void {
+        // Whatever a start step asked for, this press is more recent than it.
+        this._restarting.clear();
         const running = this._runningMacros();
         if (running.length === 1) {
             // Read before stopping: the path is cleared when the run unwinds.
@@ -482,6 +533,7 @@ export default class ClickmateExtension extends Extension {
 
     /** Halt and forget where we were, so the next run starts at the top. */
     private _stopAll(): void {
+        this._restarting.clear();
         this._clearMark();
         for (const [, runner] of this._runningMacros()) {
             runner.stop();
@@ -585,6 +637,47 @@ export default class ClickmateExtension extends Extension {
         const message = `Added: ${describeStep(step)}`;
         Main.notify('Clickmate', message);
         return { ok: true, message };
+    }
+
+    /**
+     * Wait for one click and report where it landed. The same gesture as
+     * capturing a step, minus the step: a coordinate in the editor is easier to
+     * go and point at than to read off the screen and type in, and this is how
+     * an existing one is corrected without recording the step again.
+     */
+    private async _pickPoint(): Promise<object> {
+        const fail = (message: string, hint?: string) => {
+            reportProblem('Recording', `could not pick a position: ${message}`, { hint });
+            return { ok: false, message };
+        };
+
+        if (!this._recorder || !this._daemon) {
+            return fail('the extension is not ready yet');
+        }
+        if (this._recorder.busy) {
+            return fail(this._recorder.recording ? 'stop the recording first' : 'already waiting for a click');
+        }
+
+        this._indicator?.menu.close(true);
+        Main.notify('Clickmate', 'Click the position, or move the pointer there and hold still.');
+
+        let step: Step | null = null;
+        try {
+            step = await this._recorder.captureOne();
+        } catch (error) {
+            return fail((error as Error).message,
+                'Check that the clickmate service is running: systemctl status clickmate');
+        }
+
+        // A click gives its position and a pointer that stopped gives where it
+        // stopped; either way what came back is a point on the screen.
+        if (!step || step.kind === 'click' && step.mode !== 'abs'
+            || !('x' in step) || typeof step.x !== 'number' || typeof step.y !== 'number') {
+            return fail('nothing was picked before it timed out',
+                'Click somewhere, or move the pointer and hold it still, while it waits.');
+        }
+
+        return { ok: true, x: Math.round(step.x), y: Math.round(step.y) };
     }
 
     /**
@@ -819,6 +912,10 @@ export default class ClickmateExtension extends Extension {
         }
         if (key === 'pick-region-request') {
             void this._answerRequest('pick-region', async () => ({ region: await pickRegion() }));
+            return;
+        }
+        if (key === 'pick-point-request') {
+            void this._answerRequest('pick-point', () => this._pickPoint());
             return;
         }
         if (key === 'capture-step-request') {

@@ -184,6 +184,117 @@ check('pathToStep of a missing step is empty', pathToStep(flat.body, 'gone').len
     check('and their steps interleaved', order.join('') !== 'aaabbb', order.join(''));
 }
 
+// --- and one macro's walk to a coordinate is not cut into ------------------
+
+// A click at a fixed position is a conversation with the pointer: nudge, read
+// it back, nudge again. Another macro playing in the middle of that moves the
+// very pointer being measured, so the walk holds the daemon until it has
+// clicked. Played against the real queue, with only the socket stubbed out.
+{
+    const { DaemonClient } = await import('../dist/src/daemon.js');
+    const { EV_REL, REL_X } = await import('../dist/src/keymap.js');
+
+    let pointer = [0, 0];
+    globalThis.global = { get_pointer: () => pointer };
+
+    const log = [];
+    // Stands in for the daemon: applies half of every movement it is asked for,
+    // the way an acceleration curve does, so the walk takes several passes and
+    // there is a gap to slip into.
+    DaemonClient.prototype._play = async function (events) {
+        await null;
+        for (const event of events) {
+            if (event.type === EV_REL) {
+                if (event.code === REL_X) {
+                    pointer = [pointer[0] + event.value / 2, pointer[1]];
+                    log.push('m');
+                } else {
+                    log.push('s');   // the other macro's scrolling
+                }
+            } else {
+                log.push('c');
+            }
+        }
+        return { aborted: false };
+    };
+
+    const daemon = new DaemonClient();
+    const walk = newMacro('walk');
+    const click = newStep('click');
+    click.x = 100;
+    click.y = 0;
+    walk.body.push(click);
+    const noise = newMacro('noise');
+    for (let i = 0; i < 6; i++) {
+        noise.body.push(newStep('scroll'));
+    }
+    const start = macro => new MacroRunner(daemon, evaluator, {}, {}, {}).run(macro);
+    await Promise.all([start(walk), start(noise)]);
+
+    const trace = log.join('');
+    check('the walk converged and clicked', trace.includes('c'), trace);
+    check('nothing played between its nudges and its click',
+          /^s*m+c+s*$/.test(trace), trace);
+    check('and it took several passes to get there', trace.indexOf('c') > 2, trace);
+}
+
+// --- starting and stopping other macros ------------------------------------
+{
+    // The runner knows about one macro: its own. Steps that name another one
+    // hand the name back to whoever owns the rest of them.
+    const asked = [];
+    const control = (action, macroId) => {
+        asked.push(`${action}:${macroId}`);
+        return macroId === 'gone' ? 'that macro is no longer there' : null;
+    };
+    const runWith = async body => {
+        const macro = newMacro('m');
+        macro.id = 'self';
+        macro.body.push(...body);
+        let problem = null;
+        let entered = 0;
+        const runner = new MacroRunner(daemon, evaluator, {}, {}, {
+            onMacroControl: control,
+            onStepsChanged: path => { if (path.length > 0) { entered++; } },
+            onFinished: (reason, error) => {
+                problem = reason === 'error' ? error.message : null;
+            },
+        });
+        await runner.run(macro, '');
+        return { problem, entered };
+    };
+
+    const other = kind => {
+        const step = newStep(kind);
+        step.macro = 'other';
+        return step;
+    };
+
+    await runWith([other('start'), other('stop')]);
+    check('a named macro is started and stopped through the callback',
+          asked.join(' ') === 'start:other stop:other', asked.join(' '));
+
+    asked.length = 0;
+    const after = newStep('wait');
+    after.ms = 0;
+    const stopped = await runWith([newStep('stop'), after]);
+    check('a stop with no macro named ends this run',
+          asked.length === 0 && stopped.entered === 1,
+          `${asked.join(' ')} entered=${stopped.entered}`);
+
+    asked.length = 0;
+    await runWith([newStep('start')]);
+    check('a start with no macro named restarts this one',
+          asked.join(' ') === 'start:self', asked.join(' '));
+
+    const missing = newStep('stop');
+    missing.macro = 'gone';
+    const failed = await runWith([missing]);
+    check('a macro that is not there is reported, not swallowed',
+          typeof failed.problem === 'string' && failed.problem.includes('no longer there'),
+          String(failed.problem));
+}
+
 print(failures === 0 ? '\nALL PASSED' : `\n${failures} FAILURES`);
 if (failures > 0) {
     imports.system.exit(1);
