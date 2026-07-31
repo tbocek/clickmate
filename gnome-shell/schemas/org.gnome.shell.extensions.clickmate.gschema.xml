@@ -84,6 +84,18 @@
             <description>Internal: JSON reporting how the last capture went</description>
         </key>
 
+        <key name="run-step-request" type="s">
+            <default>''</default>
+            <summary>Run one step</summary>
+            <description>Internal: JSON naming a single step the editor wants run right now</description>
+        </key>
+
+        <key name="run-step-result" type="s">
+            <default>''</default>
+            <summary>Run one step result</summary>
+            <description>Internal: JSON reporting how that step went</description>
+        </key>
+
         <key name="show-marker-request" type="s">
             <default>''</default>
             <summary>Marker request</summary>

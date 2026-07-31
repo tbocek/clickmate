@@ -13,12 +13,10 @@ export function starterMacro(): Macro {
                 id: newId(),
                 kind: 'loop',
                 count: 'forever',
-                note: 'Check the screen, act when it says so, then wait 10 seconds.',
                 body: [
                     {
                         id: newId(),
                         kind: 'if',
-                        note: 'Nothing inside runs unless the model answers yes.',
                         cond: {
                             type: 'llm',
                             prompt: 'Is the button on the left green?',
@@ -35,12 +33,10 @@ export function starterMacro(): Macro {
                                 x: 100,
                                 y: 200,
                                 holdMs: 20,
-                                note: 'Set the coordinates with the Record button.',
                             },
                             {
                                 id: newId(),
                                 kind: 'if',
-                                note: 'A cheap, deterministic check — no model needed.',
                                 cond: {
                                     type: 'color',
                                     x: 100,

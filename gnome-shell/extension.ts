@@ -458,6 +458,27 @@ export default class ClickmateExtension extends Extension {
         return { ok: true, message };
     }
 
+    /**
+     * Run one step, now, because a play button in the editor asked. Only that
+     * step: preferences does not offer this on a loop or an `if`, which would
+     * take their whole body with them — and an endless loop would take the
+     * session, from a window that has no Stop.
+     */
+    private async _runOneStep(request: { macroId?: string; stepId?: string }): Promise<object> {
+        if (!this._runner || !this._store) {
+            return { ok: false, message: 'the extension is not ready yet' };
+        }
+        if (this._runner.running) {
+            return { ok: false, message: 'a macro is running — stop it first' };
+        }
+        const macro = request.macroId ? this._store.getMacro(request.macroId) : this._store.activeMacro;
+        const loc = macro && request.stepId ? findStep(macro.body, request.stepId) : null;
+        if (!loc) {
+            return { ok: false, message: 'that step is no longer in the macro' };
+        }
+        return this._runner.runSingle(loc.step);
+    }
+
     /** Where a recording lands: whichever row the editor has selected. */
     private _recordTarget(macro: Macro): RecordTarget {
         return resolveRecordTarget(macro.body, this._settings?.get_string('record-into') ?? '');
@@ -644,6 +665,11 @@ export default class ClickmateExtension extends Extension {
         }
         if (key === 'capture-step-request') {
             void this._answerRequest<CaptureTarget>('capture-step', target => this._captureStep(target));
+            return;
+        }
+        if (key === 'run-step-request') {
+            void this._answerRequest<{ serial?: number; macroId?: string; stepId?: string }>(
+                'run-step', request => this._runOneStep(request));
             return;
         }
         if (key === 'show-marker-request') {

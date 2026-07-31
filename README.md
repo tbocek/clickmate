@@ -235,6 +235,13 @@ make becomes a `click` step at that position. If you move the pointer and hold
 still for about a second instead, you get a `move` step. `Ctrl+Shift+M` does the
 same thing without opening Settings, into whichever row is selected.
 
+The **▶** on a step does that one step immediately, on the real screen: the
+window drops out of the way, the step runs, and the window comes back. It is the
+quickest way to check that a click really lands where you meant it to, without
+running the macro around it. Steps that only mean something inside a run do not
+get one — a loop or an `if` would take its whole body along, and an endless loop
+would take the session with it from a window that has no Stop.
+
 **Move up** and **Move down** treat the editor as what you see. A folded loop is
 one card, so a step passes it in a single press; an open one is a place with an
 inside, so the same press moves the step into it — in at the top coming down, in

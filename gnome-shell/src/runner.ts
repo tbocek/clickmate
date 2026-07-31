@@ -216,22 +216,29 @@ export class MacroRunner {
         this._callbacks.onFinished?.(reason, failure);
     }
 
-    /** Run a single step on its own, for the "try this step" buttons. */
-    async runSingle(step: Step): Promise<void> {
+    /**
+     * Run a single step on its own, for the play buttons in the editor. The
+     * outcome is returned as well as reported, because the button that asked
+     * for it is in another process and has nothing else to go on.
+     */
+    async runSingle(step: Step): Promise<{ ok: boolean; message: string }> {
         if (this._running) {
-            return;
+            return { ok: false, message: 'something is already running' };
         }
         this._running = true;
         this._cancelled = false;
         this._path = [];
         this._failedAt = '';
         this._callbacks.onRunningChanged?.(true);
+        let result: { ok: boolean; message: string };
         try {
             await this._runStep(step);
-            this._status(`Ran: ${describeStep(step)}`);
+            result = { ok: true, message: `Ran: ${describeStep(step)}` };
+            this._status(result.message);
         } catch (error) {
-            this._status(`Failed: ${(error as Error).message}`);
-            reportProblem('Step', (error as Error).message, {
+            result = { ok: false, message: (error as Error).message };
+            this._status(`Failed: ${result.message}`);
+            reportProblem('Step', result.message, {
                 where: describeStep(step),
                 error: error as Error,
             });
@@ -241,6 +248,7 @@ export class MacroRunner {
             this._callbacks.onStepsChanged?.([]);
             this._callbacks.onRunningChanged?.(false);
         }
+        return result;
     }
 
     /** Abort immediately: cancel local waits and tell the daemon to let go. */

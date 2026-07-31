@@ -93,7 +93,6 @@ export interface RawEvent {
 interface StepCommon {
     id: string;
     enabled?: boolean;
-    note?: string;
 }
 
 export type ClickStep = StepCommon & {

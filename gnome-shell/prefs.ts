@@ -109,10 +109,18 @@ const STEP_ICONS: Record<StepKind, string> = {
     wait: 'alarm-symbolic',
     loop: 'media-playlist-repeat-symbolic',
     if: 'media-playlist-shuffle-symbolic',
-    break: 'media-playback-stop-symbolic',
+    break: 'application-exit-symbolic',   // an arrow leaving: out of the loop, not the macro
     continue: 'media-skip-forward-symbolic',
     stop: 'process-stop-symbolic',
 };
+
+/**
+ * The kinds worth a play button: one action each, over as soon as it is done.
+ * A loop or an `if` would drag its whole body along, and an endless loop would
+ * drag the session with it — from a window that has no Stop. `break` and the
+ * rest only mean something inside a run, so on their own they do nothing.
+ */
+const RUNNABLE_ALONE: StepKind[] = ['click', 'move', 'scroll', 'key', 'text', 'wait'];
 
 const BRANCH_STYLE: Record<BranchKind, { icon: string; title: string; hint: string }> = {
     body: {
@@ -140,26 +148,32 @@ const BRANCH_STYLE: Record<BranchKind, { icon: string; title: string; hint: stri
  * level of nesting: giving the steps their own rail as well only drew the same
  * boundary twice, a hand's width apart. The running step and the loops it sits
  * in are lit up on top of that.
+ *
+ * Every rail is an inset box-shadow rather than a border. A border is part of
+ * the box, so a row that gains one when you select it shoves its own text 4px
+ * sideways — the whole page twitches as the selection moves. A shadow is
+ * painted inside the box it already had, so nothing moves. It also means the
+ * state rails simply overwrite the branch rail instead of stacking beside it.
  */
 const EDITOR_CSS = `
 .clickmate-branch {
-    border-left: 4px solid alpha(@accent_bg_color, 0.85);
+    box-shadow: inset 4px 0 0 alpha(@accent_bg_color, 0.85);
     background-color: alpha(@accent_bg_color, 0.06);
 }
 .clickmate-branch-then {
-    border-left-color: alpha(@success_color, 0.9);
+    box-shadow: inset 4px 0 0 alpha(@success_color, 0.9);
     background-color: alpha(@success_color, 0.06);
 }
 .clickmate-branch-else {
-    border-left-color: alpha(@warning_color, 0.9);
+    box-shadow: inset 4px 0 0 alpha(@warning_color, 0.9);
     background-color: alpha(@warning_color, 0.06);
 }
 
 .clickmate-running {
     background-color: alpha(@accent_bg_color, 0.28);
-    border-left: 4px solid @accent_bg_color;
+    box-shadow: inset 4px 0 0 @accent_bg_color;
 }
-.clickmate-running-block { border-left: 4px solid @accent_bg_color; }
+.clickmate-running-block { box-shadow: inset 4px 0 0 @accent_bg_color; }
 .clickmate-running-icon { color: @accent_bg_color; }
 .clickmate-running-parent-icon { color: alpha(@accent_bg_color, 0.7); }
 
@@ -167,7 +181,7 @@ const EDITOR_CSS = `
    about a run that is not happening. */
 .clickmate-resume {
     background-color: alpha(@warning_color, 0.22);
-    border-left: 4px solid @warning_color;
+    box-shadow: inset 4px 0 0 @warning_color;
 }
 
 /* Where recorded steps land. Faint while it is only a choice; unmistakable
@@ -176,18 +190,25 @@ const EDITOR_CSS = `
    it and read as though all of that were selected too. */
 .clickmate-record-target {
     background-color: alpha(@error_color, 0.10);
-    border-left: 4px solid alpha(@error_color, 0.55);
+    box-shadow: inset 4px 0 0 alpha(@error_color, 0.55);
 }
-.clickmate-record-target-block { border-left: 4px solid alpha(@error_color, 0.55); }
+.clickmate-record-target-block { box-shadow: inset 4px 0 0 alpha(@error_color, 0.55); }
 .clickmate-recording-now {
     background-color: alpha(@error_color, 0.28);
-    border-left: 4px solid @error_color;
+    box-shadow: inset 4px 0 0 @error_color;
 }
-.clickmate-recording-now-block { border-left: 4px solid @error_color; }
+.clickmate-recording-now-block { box-shadow: inset 4px 0 0 @error_color; }
 `;
 
 /** How far a step inside a body sits in from the rail of that body. */
 const INDENT_PX = 12;
+
+/**
+ * How long a rebuilt page is given to settle before the scroll position is left
+ * alone again. Long enough for the frames that empty and refill it, short
+ * enough that a later resize — an expander opening — is your doing, not ours.
+ */
+const SCROLL_SETTLE_MS = 400;
 
 function debounce(fn: () => void, ms = 400): () => void {
     let sourceId = 0;
@@ -293,37 +314,29 @@ function infoButton(tooltip: string, markup: string, width = 46): Gtk.MenuButton
 }
 
 /**
- * What actually decides whether a check works. The instruction sent with the
- * picture asks for true or false about these words, so a statement lands and a
- * question invites prose — which is the failure people hit first.
+ * What actually decides whether a check works: advice first, then the wrapper
+ * your words go into, word for word. The wrapper is built from the real thing
+ * rather than described, so it cannot quietly stop being true — and having it
+ * under the advice is what makes the advice obviously follow: the instruction
+ * asks for true or false about one statement, so a statement lands and a
+ * question invites prose.
  */
-const PROMPT_HELP = [
-    '<b>Write a statement, not a question.</b>',
-    '',
-    'The screenshot is sent with instructions to answer nothing but true or false about the words you put here.',
-    '',
-    '<b>Lands:</b>  the button on the left is green',
-    '<b>Fragile:</b>  Is the button on the left green?',
-    '',
-    '• One visible fact at a time. “green and enabled” gives the model room to be half right.',
-    '• Say where it is: “the button at the bottom right”.',
-    '• Skip “not”. Set <b>Proceed when the answer is</b> to No instead.',
-    '• Reading the reply is lenient: yes, YES, true, 1 and a JSON object are all understood, in any case. Only a reply with no yes or no anywhere in it counts as a failure, and then <b>If the request fails</b> decides what happens.',
-    '',
-    'A tight <b>Screen area</b> helps more than any wording.',
-].join('\n');
-
-/**
- * The wrapper, shown word for word. Built from the real thing rather than
- * described, so it cannot quietly stop being true; the placeholder stands in for
- * whatever is typed in the field.
- */
-function sentPromptHelp(): string {
+function promptHelp(): string {
     const instruction = buildInstruction(_('…your words go here…'));
     return [
-        _('<b>Your words are not sent on their own.</b>'),
+        _('<b>Write a statement, not a question.</b>'),
         '',
-        _('Every check sends the screenshot together with this, your text on the STATEMENT line — which is why a statement works and a question does not:'),
+        _('<b>Lands:</b>  the button on the left is green'),
+        _('<b>Fragile:</b>  Is the button on the left green?'),
+        '',
+        _('• One visible fact at a time. “green and enabled” gives the model room to be half right.'),
+        _('• Say where it is: “the button at the bottom right”.'),
+        _('• Skip “not”. Set <b>Proceed when the answer is</b> to No instead.'),
+        _('• Reading the reply is lenient: yes, YES, true, 1 and a JSON object are all understood, in any case. Only a reply with no yes or no anywhere in it counts as a failure, and then <b>If the request fails</b> decides what happens.'),
+        '',
+        _('A tight <b>Screen area</b> helps more than any wording.'),
+        '',
+        _('<b>Your words are not sent on their own.</b> Every check sends the screenshot together with this, your text on the STATEMENT line:'),
         '',
         `<tt>${GLib.markup_escape_text(instruction, -1)}</tt>`,
     ].join('\n');
@@ -570,7 +583,54 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     // --- macros page -------------------------------------------------------
 
+    /** The scrolled window the macros page puts its own content in. */
+    private _scroller(widget: Gtk.Widget | null = this._macrosPage): Gtk.ScrolledWindow | null {
+        for (let child = widget?.get_first_child() ?? null; child; child = child.get_next_sibling()) {
+            if (child instanceof Gtk.ScrolledWindow) {
+                return child;
+            }
+            const found = this._scroller(child);
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * A rebuild throws away every row and builds new ones, and the view goes
+     * back to the top with them — so adding a step deep in a macro used to take
+     * you away from the place you were editing.
+     *
+     * Setting the offset once is not enough. At the moment the rebuild returns,
+     * neither the removal nor the additions have reached the adjustment yet, so
+     * the value looks like it took; a frame later the page is briefly empty,
+     * GTK clamps against that, and the view is at the top again. So put it back
+     * on every change of geometry until the layout settles.
+     */
+    private _restoreScroll(offset: number): void {
+        const adjustment = this._scroller()?.get_vadjustment();
+        if (!adjustment || offset <= 0) {
+            return;
+        }
+        const put = () => {
+            const max = Math.max(adjustment.get_upper() - adjustment.get_page_size(), 0);
+            adjustment.set_value(Math.min(offset, max));
+        };
+        put();
+
+        let handlerId = adjustment.connect('changed', put);
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, SCROLL_SETTLE_MS, () => {
+            if (handlerId) {
+                adjustment.disconnect(handlerId);
+                handlerId = 0;
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     private _rebuildMacros(): void {
+        const offset = this._scroller()?.get_vadjustment().get_value() ?? 0;
         this._rebuilding = true;
         for (const group of this._macroGroups) {
             this._macrosPage.remove(group);
@@ -587,7 +647,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const actions = new Adw.PreferencesGroup({
             title: _('Macros'),
-            description: _('Each macro is a list of steps. Loops and conditions nest inside each other.'),
+            description: _('Steps run top to bottom. Loops and conditions nest.'),
         });
 
         const addButton = new Gtk.Button({
@@ -612,7 +672,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             const activeId = this._store.activeMacro?.id ?? ids[0];
             const selector = new Adw.ComboRow({
                 title: _('Selected macro'),
-                subtitle: _('The one the panel switch and the shortcuts run'),
+                subtitle: _('What the panel switch and the shortcuts run'),
                 model,
                 selected: Math.max(0, ids.indexOf(activeId)),
             });
@@ -637,7 +697,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         ));
         actions.add(this._transferRow(
             _('Settings'),
-            `${_('Endpoint, model, sockets and shortcuts')} — ~/${SETTINGS_FILE}`,
+            `${_('Everything but the macros')} — ~/${SETTINGS_FILE}`,
             () => this._exportSettings(),
             () => this._importSettings(),
         ));
@@ -649,7 +709,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             const empty = new Adw.PreferencesGroup();
             empty.add(new Adw.ActionRow({
                 title: _('No macros yet'),
-                subtitle: _('Add one, then record into it from the panel menu.'),
+                subtitle: _('Add one, then record into it'),
             }));
             this._macrosPage.add(empty);
             this._macroGroups.push(empty);
@@ -667,6 +727,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._applyRunningHighlight();
         this._applyResumeMark();
         this._applyRecordTarget();
+        this._restoreScroll(offset);
     }
 
     // --- running position --------------------------------------------------
@@ -865,7 +926,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const addRow = new Adw.ActionRow({
             title: _('The end of the macro'),
-            subtitle: _('Add a step here, or send a recording here'),
+            subtitle: _('Steps and recordings land here'),
         });
         const recordButton = new Gtk.Button({
             label: _('Record one'),
@@ -902,14 +963,13 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
     /**
-     * What a step says when it is closed: your own note first, then what it
-     * contains, so a collapsed loop still tells you it holds four steps.
+     * What a step says under its title: only what the title cannot, so a
+     * collapsed loop still tells you it holds four steps. Everything else about
+     * the step is already in the title, and a second line of grey saying it
+     * again is a second line of grey.
      */
     private _stepSubtitle(step: Step): string {
         const parts: string[] = [];
-        if (step.note) {
-            parts.push(step.note);
-        }
         if (step.kind === 'loop') {
             parts.push(`${this._countLabel(step.body.length)} ${_('in the body')}`);
         } else if (step.kind === 'if') {
@@ -1021,6 +1081,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             });
             row.add_suffix(count);
             row.add_suffix(forever);
+        }
+
+        if (RUNNABLE_ALONE.includes(step.kind)) {
+            row.add_suffix(iconButton('media-playback-start-symbolic',
+                _('Do this one step now, on the real screen'),
+                () => this._runStepNow(macro.id, step)));
         }
 
         // Marks where the next run picks up. At most one step in the document
@@ -1295,8 +1361,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     condition.prompt = text;
                     save();
                 });
-                promptRow.add_suffix(infoButton(_('What is actually sent'), sentPromptHelp(), 64));
-                promptRow.add_suffix(infoButton(_('How to word this'), PROMPT_HELP));
+                promptRow.add_suffix(infoButton(
+                    _('How to word this, and what is actually sent'), promptHelp(), 64));
                 rows.push(promptRow);
                 rows.push(comboRow(_('Proceed when the answer is'), ['yes', 'no'] as const,
                     { yes: _('Yes'), no: _('No') },
@@ -1309,7 +1375,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     title: _('Screen area'),
                     subtitle: condition.region
                         ? `${condition.region.w}×${condition.region.h} at ${condition.region.x},${condition.region.y}`
-                        : _('The whole screen — narrowing it down makes answers faster and more reliable'),
+                        : _('The whole screen'),
                 });
                 const pick = new Gtk.Button({ label: _('Pick area…'), valign: Gtk.Align.CENTER });
                 pick.connect('clicked', () => this._pickRegionFor(condition));
@@ -1627,6 +1693,24 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         });
     }
 
+    /**
+     * Do one step on the real screen, right now. The window gets out of the way
+     * first for anything aimed at a position, or the click would land on this
+     * window instead of on whatever you are pointing it at; a wait has nothing
+     * to look at, so it does not bother.
+     */
+    private _runStepNow(macroId: string, step: Step): void {
+        this._save();   // the shell runs what is in the document, not what is on screen
+        this._askShell('run-step', { macroId, stepId: step.id }, {
+            minimize: step.kind !== 'wait',
+            onResult: answer => {
+                if (!answer.ok) {
+                    this._toast(`${describeStep(step)}: ${answer.message ?? _('it did not run')}`);
+                }
+            },
+        });
+    }
+
     /** Drag a rectangle on the real screen to set an LLM condition's area. */
     private _pickRegionFor(condition: LlmCondition): void {
         this._askShell('pick-region', {}, {
@@ -1655,7 +1739,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const group = new Adw.PreferencesGroup({
             title: _('Local vision model'),
-            description: _('Any OpenAI-compatible chat completions endpoint: llama.cpp-server, LM Studio, vLLM, or Ollama on /v1.'),
+            description: _('Any OpenAI-compatible endpoint: llama.cpp-server, LM Studio, vLLM, or Ollama on /v1.'),
         });
 
         const endpoint = new Adw.EntryRow({ title: _('Endpoint') });
@@ -1680,7 +1764,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const testRow = new Adw.ActionRow({
             title: _('Test the connection'),
-            subtitle: _('Sends one small picture and reports what comes back'),
+            subtitle: _('Sends one small picture'),
         });
         const testButton = new Gtk.Button({ label: _('Test'), valign: Gtk.Align.CENTER });
         testRow.add_suffix(testButton);
@@ -1720,7 +1804,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const imageGroup = new Adw.PreferencesGroup({
             title: _('Screenshots'),
-            description: _('Sent as PNG, so text stays sharp. Smaller images mean faster answers, and restricting a condition to a screen area helps more than scaling does.'),
+            description: _('Sent as PNG, so text stays sharp. A tight screen area helps more than scaling.'),
         });
         const scale = scaleWidthFor(this._settings.get_int('llm-max-width'));
         if (Number(scale) !== this._settings.get_int('llm-max-width')) {
@@ -1742,7 +1826,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const daemon = new Adw.PreferencesGroup({
             title: _('Daemon'),
-            description: _('The clickmate service injects and observes events. Start it with sudo systemctl start clickmate.'),
+            description: _('Injects and observes events. Start it with: sudo systemctl start clickmate'),
         });
         daemon.add(entryRow(_('Control socket'), this._settings.get_string('control-socket'), text => {
             this._settings.set_string('control-socket', text);
@@ -1754,7 +1838,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const recording = new Adw.PreferencesGroup({ title: _('Recording') });
         recording.add(spinRow(
-            _('Turn pauses longer than this into waits (ms, 0 = never)'),
+            _('Pauses longer than this become waits (ms, 0 = never)'),
             this._settings.get_int('record-gap-ms'), 0, 60000, 10,
             value => this._settings.set_int('record-gap-ms', Math.round(value)),
         ));
