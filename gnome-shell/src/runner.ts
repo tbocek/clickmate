@@ -251,8 +251,20 @@ export class MacroRunner {
         return result;
     }
 
-    /** Abort immediately: cancel local waits and tell the daemon to let go. */
-    stop(): void {
+    /**
+     * Abort immediately: cancel local waits and tell the daemon to let go.
+     *
+     * `abortDaemon` is false when another macro is still running. The daemon's
+     * stop is global — it aborts whatever is being injected right now, whoever
+     * asked for it — and that would be the other macro's event train. Our own
+     * loop stops either way; at worst one already-submitted step finishes.
+     */
+    stop(abortDaemon = true): void {
+        if (!abortDaemon) {
+            this._cancelled = true;
+            this._wakeNow();
+            return;
+        }
         if (!this._running && !this._cancelled) {
             // Still worth telling the daemon, in case a key is stuck from a crash.
             void this._daemon.stop().catch(() => {});

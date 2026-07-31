@@ -38,6 +38,9 @@ repeat forever:
   bisect a macro instead of deleting from it, and JSON import/export.
 - **A panel popup that stays out of the way** — a switch, a stop, what is
   running, and a way into the settings.
+- **Several macros at once** — a switch per macro says which ones **Run**
+  starts, and they run side by side, interleaving a step at a time over the one
+  pointer and keyboard.
 - **Pause and continue** — halting a run remembers the step it was on, and
   selecting a step is what says where the next run starts.
 - **Record straight into a loop body** — click the row a recording should land
@@ -172,33 +175,55 @@ reporting that none was found.
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+F5` | Open the popup |
-| `Ctrl+Shift+F6` | Run the selected macro / pause it / continue |
+| `Ctrl+Shift+F6` | Run the macros that are switched on / pause them / continue |
 | `Ctrl+Shift+R` | Start / stop recording into the selected macro |
 | `Ctrl+Shift+M` | Capture one click or move, appended to the selected macro |
 | `Super+Escape` | Emergency stop |
 
-The panel popup holds only a run switch, a **Stop**, the name of whatever is
-running, and a **Settings** button. It is also where progress shows up: the
-current step, the last condition verdict, "Recorded 3 steps". That text is kept
-after the fact, because most of it happens while the menu is closed — click the
-panel icon to read it. Everything else — macros, steps, conditions, which macro
-the switch runs — lives in the preferences window.
+The panel popup holds only a run switch, a **Stop**, what is running, and a
+**Settings** button. It is also where progress shows up: the current step, the
+last condition verdict, "Recorded 3 steps". That text is kept after the fact,
+because most of it happens while the menu is closed — click the panel icon to
+read it. Everything else — macros, steps, conditions, which macros run — lives
+in the preferences window.
+
+### Switched on, and running several at once
+
+Each macro has a switch next to its name in the editor, and **Run** starts every
+macro that is switched on — all of them, at the same time. They are independent:
+each keeps its own place in its own steps, and one finishing or failing does not
+touch the others. What they share is the machine, so their steps interleave,
+taking turns at the pointer and keyboard one step each. Two macros both moving
+the mouse will fight over it; two watching different corners of the screen and
+clicking different buttons will not.
+
+Beside the switch is a **▶** that runs that one macro, on or off, right now —
+and turns into a **■** while it runs, which is also how the editor shows you
+which macros are going without your having to look at the panel.
+
+A macro that is switched off is still yours to edit, record into and step
+through; it just does not join in when you press Run.
 
 ### Pause, continue, stop
 
-`Ctrl+Shift+F6` — and the switch in the popup — starts the selected macro, and
-halts a running one. Halting this way writes down the step it was on, so the
-switch reads **Continue** and the next press picks up there rather than at the
-top. **Stop** in the popup, and the emergency shortcut, throw that place away:
-after either of them the macro starts from the beginning again.
+`Ctrl+Shift+F6` — and the switch in the popup — starts the macros that are
+switched on, and halts running ones. With one macro running, halting writes down
+the step it was on, so the switch reads **Continue** and the next press picks up
+there rather than at the top. Several at once are in several places and there is
+only one mark, so rather than be wrong about which, the next press starts them
+all from the top. **Stop** in the popup, and the emergency shortcut, throw the
+place away too.
 
 You can also choose the step yourself: select it. The selected row is the one
 mark the editor has — a recording lands there, and a run starts there — so
 picking up in the middle of a macro is the same gesture as recording into the
-middle of one. Only a step counts for running; selecting a body, or nothing,
-starts at the top. A run that fails selects the step that failed, so you can fix
-it and press the shortcut again instead of replaying everything before it, and a
-run that reaches the end clears the selection again.
+middle of one. There is one selection across the whole page, in whichever macro
+you last clicked; that macro is the one recordings go into, and the one that
+starts at the selected step. Only a step counts for running; selecting a body,
+or the end of a macro, starts at the top, and so do the other macros. A run that
+fails selects the step that failed, so you can fix it and press the shortcut
+again instead of replaying everything before it, and a run that reaches the end
+puts the selection back at the end of its own macro.
 
 The mark is taken at face value: continuing into the `then` or `else` of a
 condition runs that branch without asking the condition again, since asking
@@ -212,10 +237,11 @@ fixed coordinates could click its own menu. It carries on as soon as you move
 off the menu or close it.
 
 Build a macro by recording it (`Ctrl+Shift+R`), then open Settings to adjust it.
-Recorded steps go on the row you selected. Click any row in the selected macro
-and it is tinted to show it: a step, and the recording is dropped in right after
-it; a **Body**, **Then** or **Else** header, and the recording goes at the end of
-that body. Selecting nothing leaves **The end of the macro**, which is where a
+Recorded steps go on the row you selected. Click any row in any macro and it is
+tinted to show it: a step, and the recording is dropped in right after it; an
+**Add a step here** row inside a loop, or a **Yes** or **No** header, and the
+recording goes at the end of that
+body. Selecting nothing leaves **The end of the macro**, which is where a
 recording goes by default. Choose the body of a loop and a recording lands inside
 the loop instead of after it — which is what you want in a macro that is one
 endless loop, and until now meant recording at the end and moving every step in

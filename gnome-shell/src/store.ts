@@ -7,6 +7,7 @@ import Gio from 'gi://Gio';
 import {
     Macro,
     MacroDocument,
+    macroEnabled,
     parseDocument,
     stringifyDocument,
 } from './model.js';
@@ -34,6 +35,7 @@ export class MacroStore {
     constructor(settings: Gio.Settings) {
         this._settings = settings;
         this._doc = parseDocument(settings.get_string('macros'));
+        this._migrateEnabled();
 
         this._changedId = settings.connect('changed::macros', () => {
             if (this._writing) {
@@ -44,6 +46,27 @@ export class MacroStore {
             this._doc = parseDocument(this._settings.get_string('macros'));
             this._notify(true);
         });
+    }
+
+    /**
+     * Documents written before macros could be switched on and off carry no flag
+     * at all. Run used to start exactly one macro — the selected one — so that is
+     * the one left on: turning them all on would set every macro anyone ever
+     * recorded loose on the pointer at the first press. Runs once; after this the
+     * flags are on disk, and the other process finds them already there.
+     */
+    private _migrateEnabled(): void {
+        const macros = this._doc.macros;
+        // One macro needs no choosing, and on is what absent already means.
+        if (macros.length < 2 || macros.some(macro => typeof macro.enabled === 'boolean')) {
+            return;
+        }
+        const active = this._settings.get_string('active-macro-id');
+        const chosen = macros.find(macro => macro.id === active) ?? macros[0];
+        for (const macro of macros) {
+            macro.enabled = macro === chosen;
+        }
+        this.save();
     }
 
     destroy(): void {
@@ -60,6 +83,11 @@ export class MacroStore {
 
     get macros(): Macro[] {
         return this._doc.macros;
+    }
+
+    /** The macros Run starts, in document order. */
+    get enabledMacros(): Macro[] {
+        return this._doc.macros.filter(macroEnabled);
     }
 
     /**
@@ -111,7 +139,11 @@ export class MacroStore {
         this._settings.set_string('active-macro-id', id);
     }
 
-    /** The macro the popup and shortcuts act on; falls back to the first one. */
+    /**
+     * The macro being worked on — the one holding the selected row, which is
+     * where a recording lands. Not the one that runs: Run starts every enabled
+     * macro. Falls back to the first one.
+     */
     get activeMacro(): Macro | null {
         const selected = this.getMacro(this.activeMacroId);
         if (selected) {

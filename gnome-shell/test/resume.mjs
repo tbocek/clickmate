@@ -150,6 +150,40 @@ check('pathToStep reaches into an else branch',
       pathToStep(branched.body, e1.id).join('/') === `${branch.id}/${e1.id}`);
 check('pathToStep of a missing step is empty', pathToStep(flat.body, 'gone').length === 0);
 
+// --- two macros at once ----------------------------------------------------
+
+// Every enabled macro runs, and they run alongside each other rather than one
+// after the other: a runner each, over the one daemon, taking turns a step at
+// a time.
+{
+    const order = [];
+    const shared = {
+        play: async () => {
+            await null;   // the turn another runner needs to get a step in
+            return { aborted: false };
+        },
+        stop: async () => {},
+    };
+    const run = (name, steps) => {
+        const macro = newMacro(name);
+        for (let i = 0; i < steps; i++) {
+            macro.body.push(newStep('scroll'));
+        }
+        const runner = new MacroRunner(shared, evaluator, {}, {}, {
+            onStepsChanged: path => {
+                if (path.length > 0) {
+                    order.push(name);
+                }
+            },
+        });
+        return runner.run(macro);
+    };
+    await Promise.all([run('a', 3), run('b', 3)]);
+    check('both macros ran', order.filter(n => n === 'a').length === 3 &&
+          order.filter(n => n === 'b').length === 3, order.join(''));
+    check('and their steps interleaved', order.join('') !== 'aaabbb', order.join(''));
+}
+
 print(failures === 0 ? '\nALL PASSED' : `\n${failures} FAILURES`);
 if (failures > 0) {
     imports.system.exit(1);

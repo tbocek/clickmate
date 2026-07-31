@@ -3,6 +3,7 @@ import {
     insertStep, moveStep, moveStepNested, parentOf, removeStep, cloneStep, walk, findStep, newMacro,
     resolveRecordTarget,
     resolveRunStart,
+    macroEnabled,
     STEP_KIND_LABELS, parseNumbers, reachesEnd, lastPointerEndpoint,
     AUTHORABLE_STEP_KINDS,
 } from '../dist/src/model.js';
@@ -154,6 +155,25 @@ const open = () => true;
           resolveRunStart(m.body, '') === '');
     check('and so does a step that has been deleted since',
           resolveRunStart(m.body, 'after:gone') === '');
+    check('a step in another macro leaves this one starting at the top',
+          resolveRunStart(newMacro('other').body, `after:${first.id}`) === '');
+    check('the end of a macro is a target like any other',
+          resolveRecordTarget(m.body, `end:${m.id}`).at === m.body.length);
+}
+
+// switched on and off
+{
+    check('a new macro is switched on', macroEnabled(newMacro('n')));
+    check('so is one written before the flag existed',
+          macroEnabled({ id: 'm', name: 'old', body: [] }));
+    check('off is off', !macroEnabled({ id: 'm', name: 'off', enabled: false, body: [] }));
+    const kept = parseDocument(JSON.stringify({
+        version: 1,
+        macros: [{ id: 'a', name: 'a', enabled: false, body: [] }, { id: 'b', name: 'b', body: [] }],
+    })).macros;
+    check('the flag survives a round trip', kept[0].enabled === false);
+    check('and an absent one stays absent, for the store to migrate',
+          kept[1].enabled === undefined);
 }
 
 // round trip

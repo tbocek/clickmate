@@ -8,15 +8,16 @@ import St from 'gi://St';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import type { MacroStore } from '../src/store.js';
-import { describeStep, findStep } from '../src/model.js';
+import { describeStep, findStep, resolveRunStart, type Macro, type Step } from '../src/model.js';
 import { clearProblems, listProblems, onProblemsChanged, type Problem } from '../src/problems.js';
 
 export interface PopupDeps {
     store: MacroStore;
-    isRunning: () => boolean;
+    /** Ids of the macros running right now — several can be, side by side. */
+    runningMacroIds: () => string[];
     isPaused: () => boolean;
     isRecording: () => boolean;
-    /** Id of the step the next run will continue from, or '' to start at the top. */
+    /** The editor's selected row, which is also where a run continues from. */
     resumeStep: () => string;
     onEnabledChanged: (enabled: boolean) => void;
     /** Halt and forget the resume point, as opposed to the switch, which pauses. */
@@ -133,15 +134,21 @@ export class MacroPopup {
     }
 
     refresh(): void {
-        const running = this._deps.isRunning();
-        const macro = this._deps.store.activeMacro;
+        const store = this._deps.store;
+        const runningIds = this._deps.runningMacroIds();
+        const running = runningIds.length > 0;
+        const enabled = store.enabledMacros;
+        // Which macro the words are about while several could be: the one
+        // running, or the one about to.
+        const one = running
+            ? store.getMacro(runningIds[0])
+            : enabled.length === 1 ? enabled[0] : null;
 
         // Where the next run would pick up: the row selected in the editor,
-        // which a pause and a failure also write. Only meaningful for the macro
-        // that holds the step — a point left over from another one reads as
-        // idle.
-        const resumeId = this._deps.resumeStep();
-        const resumeAt = macro && resumeId ? findStep(macro.body, resumeId)?.step : undefined;
+        // which a pause and a failure also write. Only the macro holding the
+        // step continues from it; the rest start at the top, and a mark in a
+        // macro that is switched off does nothing at all.
+        const resumeAt = this._resumeStep(enabled);
 
         this._updatingSwitch = true;
         this._switchItem.setToggleState(running);
@@ -151,24 +158,46 @@ export class MacroPopup {
         this._switchLabel.text = !running && resumeAt ? 'Continue' : 'Run';
         this._stopItem.visible = running || resumeAt !== undefined;
 
+        const many = `${runningIds.length} macros`;
         if (this._deps.isRecording()) {
-            this._statusLabel.text = macro ? `Recording into “${macro.name}”` : 'Recording';
+            const into = store.activeMacro;
+            this._statusLabel.text = into ? `Recording into “${into.name}”` : 'Recording';
         } else if (running && this._deps.isPaused()) {
-            this._statusLabel.text = macro ? `Holding — “${macro.name}”` : 'Holding';
+            this._statusLabel.text = one ? `Holding — “${one.name}”` : `Holding — ${many}`;
         } else if (running) {
-            this._statusLabel.text = macro ? `Running “${macro.name}”` : 'Running';
-        } else if (!macro) {
-            this._statusLabel.text = 'No macro selected';
+            this._statusLabel.text = one ? `Running “${one.name}”` : `Running ${many}`;
+        } else if (enabled.length === 0) {
+            this._statusLabel.text = store.macros.length === 0
+                ? 'No macros yet'
+                : 'Nothing switched on';
         } else if (resumeAt) {
             this._statusLabel.text = `Continues at ${describeStep(resumeAt)}`;
+        } else if (one) {
+            this._statusLabel.text = `Idle — “${one.name}” is on`;
         } else {
-            this._statusLabel.text = `Idle — “${macro.name}” selected`;
+            this._statusLabel.text = `Idle — ${enabled.length} macros are on`;
         }
 
         this._detailLabel.text = this._message;
         this._detailLabel.visible = this._message !== '';
 
         this._refreshProblems();
+    }
+
+    /**
+     * The step a run would continue at, from the editor's selection. Searched
+     * across the enabled macros: whichever one holds it is the one that starts
+     * there, and a selection in a macro that is switched off is just a cursor.
+     */
+    private _resumeStep(enabled: Macro[]): Step | undefined {
+        const raw = this._deps.resumeStep();
+        for (const macro of enabled) {
+            const id = resolveRunStart(macro.body, raw);
+            if (id) {
+                return findStep(macro.body, id)?.step;
+            }
+        }
+        return undefined;
     }
 
     /**

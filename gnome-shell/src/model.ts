@@ -178,7 +178,19 @@ export type StepKind = Step['kind'];
 export interface Macro {
     id: string;
     name: string;
+    /**
+     * Whether Run starts this one. Several can be on at once, and they run
+     * alongside each other. Absent counts as on, so a macro written before this
+     * flag existed still runs — the store turns the older documents into
+     * explicit flags once, on the way in.
+     */
+    enabled?: boolean;
     body: Step[];
+}
+
+/** Absent means on: see `Macro.enabled`. */
+export function macroEnabled(macro: Macro): boolean {
+    return macro.enabled !== false;
 }
 
 export interface MacroDocument {
@@ -197,7 +209,7 @@ export function emptyDocument(): MacroDocument {
 }
 
 export function newMacro(name = 'New macro'): Macro {
-    return { id: newId(), name, body: [] };
+    return { id: newId(), name, enabled: true, body: [] };
 }
 
 export function newCondition(type: ConditionType): Condition {
@@ -827,6 +839,10 @@ export function parseDocument(json: string): MacroDocument {
             const fixed: Macro = {
                 id: macro.id || newId(),
                 name: macro.name || 'Unnamed macro',
+                // Left absent when it is absent, rather than defaulted here:
+                // the store tells a document from before the flag existed by
+                // the fact that nothing in it carries one.
+                enabled: typeof macro.enabled === 'boolean' ? macro.enabled : undefined,
                 body: Array.isArray(macro.body) ? macro.body : [],
             };
             walk(fixed.body, loc => {

@@ -79,6 +79,8 @@ interface AsyncDataInputStream {
 export class DaemonClient {
     private _controlPath: string;
     private _eventPath: string;
+    /** Tail of the queue of playbacks; see `play`. */
+    private _turn: Promise<void> = Promise.resolve();
 
     constructor(controlPath = DEFAULT_CONTROL_SOCKET, eventPath = DEFAULT_EVENT_SOCKET) {
         ensurePromisified();
@@ -192,7 +194,21 @@ export class DaemonClient {
      * Play an event train. The daemon answers only once the train has finished,
      * so the returned promise resolves when the input has actually been sent.
      */
+    /**
+     * The daemon plays one event train at a time and answers "busy" to anything
+     * that arrives during one. Several macros running at once would hit that
+     * constantly, and a busy answer is a failed step rather than a short wait —
+     * so they queue up here instead, one step each, in the order they asked.
+     */
     async play(events: RawEvent[]): Promise<PlayResult> {
+        const turn = this._turn.then(() => this._play(events), () => this._play(events));
+        // The queue must not stop at the first failure, and an unhandled
+        // rejection on it would be reported twice: the caller gets the real one.
+        this._turn = turn.then(() => {}, () => {});
+        return turn;
+    }
+
+    private async _play(events: RawEvent[]): Promise<PlayResult> {
         if (events.length === 0) {
             return { aborted: false };
         }

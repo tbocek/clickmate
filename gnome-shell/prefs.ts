@@ -24,6 +24,7 @@ import {
     describeCondition,
     describeStep,
     emptyDocument,
+    macroEnabled,
     moveStepNested,
     newCondition,
     newMacro,
@@ -120,6 +121,11 @@ const STEP_ICONS: Record<StepKind, string> = {
  */
 const RUNNABLE_ALONE: StepKind[] = ['click', 'move', 'scroll', 'key', 'text', 'wait'];
 
+/**
+ * Only `then` and `else` get a header row of their own — a loop has one body
+ * and shows it in the loop's own row, so of `body` only the hint is used, on
+ * that row.
+ */
 const BRANCH_STYLE: Record<BranchKind, { icon: string; title: string; hint: string }> = {
     body: {
         icon: 'media-playlist-repeat-symbolic',
@@ -384,17 +390,19 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     private _stepRows = new Map<string, StepRow>();
     private _highlighted: string[] = [];
     private _runningChangedId = 0;
+    /** The ▶/■ beside each macro's name, by macro id. */
+    private _runButtons = new Map<string, Gtk.Button>();
 
-    // The step the next run continues from — at most one, so the buttons behave
-    // like radio buttons that happen to be spread across the whole page.
-
-    // The selected row: click one and a recording goes there. Kept in settings
-    // rather than in a widget because the shell is what acts on it, and because
-    // a rebuild of the page must not lose the selection. '' is the end of the
-    // macro, "after:<stepId>" a step, "in:<stepId>:<branch>" a body.
+    // The selected row: click one and a recording goes there, and the macro
+    // holding it continues from there. One across the whole page, in whichever
+    // macro. Kept in settings rather than in a widget because the shell is what
+    // acts on it, and because a rebuild of the page must not lose it.
+    // "end:<macroId>" is the end of a macro, "after:<stepId>" a step,
+    // "in:<stepId>:<branch>" a body.
     private _targetRows = new Map<string, Gtk.Widget>();
     private _recordButtons: Gtk.Button[] = [];
-    private _markedTarget = '';
+    /** The row currently painted as the target, so it can be unpainted. */
+    private _markedRow?: Gtk.Widget;
     private _targetChangedId = 0;
     private _recordingChangedId = 0;
 
@@ -662,6 +670,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // Every row just went away, so nothing is highlighted any more either.
         this._stepRows.clear();
         this._targetRows.clear();
+        this._markedRow = undefined;
+        this._runButtons.clear();
         this._recordButtons = [];
         this._branchRows.clear();
         this._highlighted = [];
@@ -681,32 +691,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._rebuildMacros();
         });
         actions.set_header_suffix(addButton);
-
-        // The panel switch and the shortcuts act on one macro; this is where you
-        // choose which, now that the popup itself is just a switch.
-        if (this._store.macros.length > 0) {
-            const ids = this._store.macros.map(macro => macro.id);
-            const model = new Gtk.StringList();
-            for (const macro of this._store.macros) {
-                model.append(macro.name);
-            }
-            const activeId = this._store.activeMacro?.id ?? ids[0];
-            const selector = new Adw.ComboRow({
-                title: _('Selected macro'),
-                subtitle: _('What the panel switch and the shortcuts run'),
-                model,
-                selected: Math.max(0, ids.indexOf(activeId)),
-            });
-            selector.connect('notify::selected', () => {
-                const id = ids[selector.get_selected()];
-                if (id && id !== this._store.activeMacroId) {
-                    // The chosen body belongs to the macro being left behind.
-                    this._settings.set_string('record-into', '');
-                    this._store.activeMacroId = id;
-                }
-            });
-            actions.add(selector);
-        }
 
         // Two files, because they move for different reasons: the steps are the
         // work, the settings are the machine they run on.
@@ -766,15 +750,43 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         }
         this._highlighted = [];
 
-        const ids = this._runningStepIds();
-        ids.forEach((id, index) => {
-            const entry = this._stepRows.get(id);
-            if (!entry) {
-                return; // a step from another macro, or one just deleted
-            }
-            this._setRunState(entry, index === ids.length - 1 ? 'active' : 'ancestor');
-            this._highlighted.push(id);
-        });
+        const paths = this._runningPaths();
+        for (const { steps } of paths) {
+            steps.forEach((id, index) => {
+                const entry = this._stepRows.get(id);
+                if (!entry) {
+                    return; // a step just deleted
+                }
+                this._setRunState(entry, index === steps.length - 1 ? 'active' : 'ancestor');
+                this._highlighted.push(id);
+            });
+        }
+
+        // The ▶ beside each macro is the other half of this: a macro whose steps
+        // are all inside folded bodies would otherwise show nothing at all.
+        const running = new Set(paths.map(entry => entry.macro));
+        for (const [macroId, button] of this._runButtons) {
+            this._setRunButton(button, running.has(macroId));
+        }
+    }
+
+    private _setRunButton(button: Gtk.Button, running: boolean): void {
+        button.set_icon_name(running
+            ? 'media-playback-stop-symbolic'
+            : 'media-playback-start-symbolic');
+        button.set_tooltip_text(running ? _('Stop this macro') : _('Run this macro now'));
+        if (running) {
+            button.add_css_class('clickmate-running-icon');
+        } else {
+            button.remove_css_class('clickmate-running-icon');
+        }
+    }
+
+    /** The line under a macro's name: what the switch beside it means. */
+    private _macroHint(macro: Macro): string {
+        return macroEnabled(macro)
+            ? _('On — runs with the others when you press Run')
+            : _('Off — only runs from its own ▶');
     }
 
     /**
@@ -783,17 +795,20 @@ export default class ClickmatePreferences extends ExtensionPreferences {
      * icon is a long way from the body you chose.
      */
     private _applyRecordTarget(): void {
-        const target = this._settings.get_string('record-into');
-
-        const marked = this._targetRows.get(this._markedTarget);
         for (const cls of ['clickmate-record-target', 'clickmate-recording-now']) {
-            marked?.remove_css_class(cls);
-            marked?.remove_css_class(`${cls}-block`);
+            this._markedRow?.remove_css_class(cls);
+            this._markedRow?.remove_css_class(`${cls}-block`);
         }
-        this._markedTarget = target;
+
+        // A selection nothing on the page answers to — none yet, or one left in a
+        // macro that has since gone — falls back to the end of the macro being
+        // worked on, which is where the shell would put a recording anyway.
+        const target = this._settings.get_string('record-into');
+        const row = this._targetRows.get(target)
+            ?? this._targetRows.get(`end:${this._store.activeMacro?.id ?? ''}`);
+        this._markedRow = row;
 
         const recording = this._settings.get_string('recording') !== '';
-        const row = this._targetRows.get(target);
         if (row) {
             const base = recording ? 'clickmate-recording-now' : 'clickmate-record-target';
             row.add_css_class(row instanceof Adw.ExpanderRow ? `${base}-block` : base);
@@ -822,11 +837,17 @@ export default class ClickmatePreferences extends ExtensionPreferences {
      * did before — a step still folds open, a button still fires. Rows nest, and
      * capture order runs outermost first, so the innermost row you actually
      * clicked is the one that has the last word.
+     *
+     * There is one selection across every macro, so selecting here also says
+     * which macro is the one being worked on — the shell records into that one.
      */
-    private _selectable(row: Gtk.Widget, target: string): void {
+    private _selectable(row: Gtk.Widget, target: string, macroId: string): void {
         const click = new Gtk.GestureClick();
         click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE);
         click.connect('pressed', () => {
+            if (this._store.activeMacroId !== macroId) {
+                this._store.activeMacroId = macroId;
+            }
             if (this._settings.get_string('record-into') !== target) {
                 this._settings.set_string('record-into', target);
             }
@@ -835,17 +856,31 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._targetRows.set(target, row);
     }
 
-    private _runningStepIds(): string[] {
+    /** What the shell publishes: one chain of step ids per running macro. */
+    private _runningPaths(): { macro: string; steps: string[] }[] {
         try {
             const raw = this._settings.get_string('running-steps');
             if (!raw) {
                 return [];
             }
-            const parsed = JSON.parse(raw) as { steps?: unknown };
-            return Array.isArray(parsed.steps) ? parsed.steps.filter(id => typeof id === 'string') : [];
+            const parsed = JSON.parse(raw) as { running?: unknown };
+            if (!Array.isArray(parsed.running)) {
+                return [];
+            }
+            return parsed.running
+                .filter((entry): entry is { macro: string; steps: string[] } =>
+                    !!entry && typeof entry.macro === 'string' && Array.isArray(entry.steps))
+                .map(entry => ({
+                    macro: entry.macro,
+                    steps: entry.steps.filter(id => typeof id === 'string'),
+                }));
         } catch {
             return [];
         }
+    }
+
+    private _runningMacroIds(): string[] {
+        return this._runningPaths().map(entry => entry.macro);
     }
 
     private _setRunState(entry: StepRow, state: 'idle' | 'active' | 'ancestor'): void {
@@ -905,7 +940,30 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
     private _buildMacroGroup(macro: Macro): Adw.PreferencesGroup {
-        const group = new Adw.PreferencesGroup({ title: macro.name });
+        const group = new Adw.PreferencesGroup({
+            title: macro.name,
+            description: this._macroHint(macro),
+        });
+
+        // Its own ▶, whether it is switched on or not: the switch is about the
+        // next press of Run, this is about now. It turns into a Stop while the
+        // macro is going, which is also how the editor shows that it is — the
+        // panel icon is a long way from the window you are looking at.
+        const runButton = iconButton('media-playback-start-symbolic',
+            _('Run this macro now'),
+            () => this._runMacroNow(macro.id, this._runningMacroIds().includes(macro.id) ? 'stop' : 'run'));
+        this._runButtons.set(macro.id, runButton);
+
+        const enabled = new Gtk.Switch({
+            active: macroEnabled(macro),
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Include this macro when you press Run'),
+        });
+        enabled.connect('notify::active', () => {
+            macro.enabled = enabled.get_active();
+            group.set_description(this._macroHint(macro));
+            this._save();
+        });
 
         const remove = new Gtk.Button({
             icon_name: 'user-trash-symbolic',
@@ -917,7 +975,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._store.removeMacro(macro.id);
             this._rebuildMacros();
         });
-        group.set_header_suffix(remove);
+
+        const header = new Gtk.Box({ spacing: 6, valign: Gtk.Align.CENTER });
+        header.append(runButton);
+        header.append(enabled);
+        header.append(remove);
+        group.set_header_suffix(header);
 
         group.add(entryRow(_('Name'), macro.name, text => {
             macro.name = text;
@@ -936,11 +999,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         recordButton.connect('clicked', () => this._captureStepInto(macro.id, null, null));
         this._recordButtons.push(recordButton);
 
-        // Only the selected macro is ever recorded into, so only its rows are
-        // selectable — a highlight on a macro nothing records into would lie.
-        if (macro.id === this._store.activeMacroId) {
-            this._selectable(addRow, '');
-        }
+        this._selectable(addRow, `end:${macro.id}`, macro.id);
         addRow.add_suffix(this._addStepDropdown(macro.body));
         addRow.add_suffix(recordButton);
         group.add(addRow);
@@ -971,7 +1030,9 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     private _stepSubtitle(step: Step): string {
         const parts: string[] = [];
         if (step.kind === 'loop') {
-            parts.push(`${this._countLabel(step.body.length)} ${_('in the body')}`);
+            // The body hangs off this row rather than off a header of its own,
+            // so this line is the one that has to say what is in it.
+            parts.push(`${this._countLabel(step.body.length)} — ${_(BRANCH_STYLE.body.hint)}`);
         } else if (step.kind === 'if') {
             parts.push(`${this._countLabel(step.then.length)} ${_('then')}, ` +
                 `${this._countLabel((step.else ?? []).length)} ${_('else')}`);
@@ -998,18 +1059,26 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     ): Gtk.Widget[] {
         const stepKey = `step:${step.id}`;
         const children = childLists(step);
+        // A loop has one body and nothing to choose between, so it holds that
+        // body itself instead of putting a "Body" header under it: the header
+        // said what the "Repeat" row above it already said, and cost a row and a
+        // level of indent for it. An `if` keeps its Yes and No headers — there
+        // the header is the only thing saying which of the two you are reading.
+        const inline = children.length === 1 && children[0].key === 'body';
         // A card that opens onto nothing is a card that should not open. Steps
-        // with settings of their own keep the expander; the rest — a repeat, a
-        // break — are one line, and clicking them only selects them.
+        // with settings of their own keep the expander; the rest — a break, a
+        // stop — are one line, and clicking them only selects them.
         const fields = this._buildStepFields(macro, step);
         const props = { title: describeStep(step), subtitle: this._stepSubtitle(step) };
-        const row: Adw.ActionRow | Adw.ExpanderRow = fields.length > 0
-            ? this._expander(stepKey, props)
+        const row: Adw.ActionRow | Adw.ExpanderRow = fields.length > 0 || inline
+            ? this._expander(stepKey, props, inline && children[0].steps.length > 0)
             : new Adw.ActionRow(props);
         const widgets: Gtk.Widget[] = [row];
         const branchRows: Adw.ExpanderRow[] = [];
 
         row.set_margin_start(indent);
+        // A loop holds its body, so switching one off greys out everything in
+        // it as well — which is exactly what a switched-off loop does to it.
         if (step.enabled === false) {
             row.add_css_class('dim-label');
         }
@@ -1121,9 +1190,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._saveAndRebuild();
         }));
 
-        if (macro.id === this._store.activeMacroId) {
-            this._selectable(row, `after:${step.id}`);
-        }
+        this._selectable(row, `after:${step.id}`, macro.id);
 
         if (row instanceof Adw.ExpanderRow) {
             for (const child of fields) {
@@ -1132,36 +1199,49 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         }
 
         // Nested bodies. Each is its own block: coloured rail, own icon, and the
-        // steps inside it indented one step further under that rail.
+        // steps inside it indented one step further under that rail. A loop's
+        // body is the step's own row (see `inline`); everything below is written
+        // against whichever row is holding the steps.
         for (const list of children) {
             const kind: BranchKind =
                 list.key === 'then' || list.key === 'else' ? list.key : 'body';
             const style = BRANCH_STYLE[kind];
-            const nested = this._expander(`${stepKey}:${list.key}`, {
-                title: _(style.title),
-                subtitle: `${this._countLabel(list.steps.length)} — ${_(style.hint)}`,
-            }, list.steps.length > 0);
-            nested.set_margin_start(indent + INDENT_PX);
+            let nested: Adw.ExpanderRow;
+            if (inline) {
+                nested = row as Adw.ExpanderRow;
+            } else {
+                nested = this._expander(`${stepKey}:${list.key}`, {
+                    title: _(style.title),
+                    subtitle: `${this._countLabel(list.steps.length)} — ${_(style.hint)}`,
+                }, list.steps.length > 0);
+                nested.set_margin_start(indent + INDENT_PX);
+                nested.add_prefix(new Gtk.Image({
+                    icon_name: style.icon,
+                    valign: Gtk.Align.CENTER,
+                }));
+                branchRows.push(nested);
+                widgets.push(nested);
+                // The step row is already selectable as "after this step"; a
+                // block of its own gets a selection of its own.
+                this._selectable(nested, `in:${step.id}:${list.key}`, macro.id);
+            }
             nested.add_css_class('clickmate-branch');
             nested.add_css_class(`clickmate-branch-${kind}`);
-            nested.add_prefix(new Gtk.Image({
-                icon_name: style.icon,
-                valign: Gtk.Align.CENTER,
-            }));
-            branchRows.push(nested);
             this._branchRows.set(`${step.id}:${list.key}`, nested);
-            widgets.push(nested);
 
-            if (macro.id === this._store.activeMacroId) {
-                this._selectable(nested, `in:${step.id}:${list.key}`);
-            }
-
-            const addNested = new Adw.ActionRow({ title: _('Add a step here') });
+            const addNested = new Adw.ActionRow({
+                title: _('Add a step here'),
+                // Where the selection goes when a loop has no header to click.
+                subtitle: inline ? _('Steps and recordings land here') : '',
+            });
             addNested.set_margin_start(INDENT_PX);   // lines up with the steps below it
             addNested.add_prefix(new Gtk.Image({
                 icon_name: 'list-add-symbolic',
                 valign: Gtk.Align.CENTER,
             }));
+            if (inline) {
+                this._selectable(addNested, `in:${step.id}:${list.key}`, macro.id);
+            }
             const nestedRecord = new Gtk.Button({
                 label: _('Record one'),
                 tooltip_text: _('Click anywhere on screen, or move the pointer and hold still, to add that as a step'),
@@ -1687,6 +1767,27 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 // just ran, so anything recorded next goes on from there rather
                 // than back where the selection happened to be.
                 this._settings.set_string('record-into', `after:${step.id}`);
+            },
+        });
+    }
+
+    /**
+     * Start or stop one macro from the button beside its name. The window gets
+     * out of the way first, the same as for a single step: whatever the macro
+     * clicks on, it is not meant to be this window. It comes back only if the
+     * shell says no, because a message behind a minimised window is no message.
+     */
+    private _runMacroNow(macroId: string, action: 'run' | 'stop'): void {
+        this._save();   // the shell runs what is in the document, not what is on screen
+        if (action === 'run') {
+            this._window?.minimize();
+        }
+        this._askShell('run-macro', { macroId, action }, {
+            onResult: answer => {
+                if (!answer.ok) {
+                    this._window?.present();
+                    this._toast(answer.message ?? _('it did not run'));
+                }
             },
         });
     }

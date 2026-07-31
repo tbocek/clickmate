@@ -15,13 +15,13 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import { ConditionEvaluator, type EvaluationTrace } from './src/conditions.js';
 import { DaemonClient } from './src/daemon.js';
-import { MacroRunner, type RunningStep } from './src/runner.js';
+import { MacroRunner, type FinishReason, type RunningStep } from './src/runner.js';
 import { Recorder, acceleratorToEvdevCodes } from './src/recorder.js';
 import { MacroStore, type Config } from './src/store.js';
 import { starterMacro } from './src/starter.js';
 import {
-    childLists, describeStep, findStep, lastPointerEndpoint, reachesEnd, resolveRecordTarget,
-    resolveRunStart, type Macro, type RecordTarget, type Step,
+    childLists, describeStep, findStep, lastPointerEndpoint, reachesEnd,
+    resolveRecordTarget, resolveRunStart, type Macro, type RecordTarget, type Step,
 } from './src/model.js';
 import { clearProblems, onProblemsChanged, problemCount, reportProblem } from './src/problems.js';
 import { MacroPopup } from './ui/popup.js';
@@ -51,7 +51,13 @@ export default class ClickmateExtension extends Extension {
     private _store?: MacroStore;
     private _daemon?: DaemonClient;
     private _evaluator?: ConditionEvaluator;
-    private _runner?: MacroRunner;
+    /**
+     * One runner per macro, made when that macro first runs and kept afterwards.
+     * Several can be going at once — every enabled macro starts together — and
+     * they interleave a step at a time, because there is one pointer, one
+     * keyboard and one daemon between them.
+     */
+    private _runners = new Map<string, MacroRunner>();
     private _recorder?: Recorder;
     private _popup?: MacroPopup;
     private _indicator?: PanelMenu.Button;
@@ -61,7 +67,7 @@ export default class ClickmateExtension extends Extension {
     private _settingsChangedId = 0;
     private _storeUnsubscribe?: () => void;
     private _problemsUnsubscribe?: () => void;
-    private _runningPath: RunningStep[] = [];
+    private _runningPaths = new Map<string, RunningStep[]>();
     private _publishSourceId = 0;
     private _publishSerial = 0;
 
@@ -78,31 +84,6 @@ export default class ClickmateExtension extends Extension {
         const config = this._store.config;
         this._daemon = new DaemonClient(config.controlSocket, config.eventSocket);
         this._evaluator = new ConditionEvaluator(config, trace => this._onTrace(trace));
-        this._runner = new MacroRunner(this._daemon, this._evaluator, this._settings, config, {
-            onStatus: text => this._onStatus(text),
-            onRunningChanged: running => this._onRunningChanged(running),
-            onStepsChanged: path => this._onStepsChanged(path),
-            shouldPause: () => this._isPointerOverMenu(),
-            onFinished: (reason, error) => {
-                if (reason === 'done') {
-                    // Ran to the end, so there is nothing left to continue from.
-                    this._resumeStep = '';
-                } else if (reason === 'error') {
-                    // Continue from the step that threw: you fix it, then press
-                    // the shortcut again rather than replaying everything before.
-                    this._resumeStep = this._runner?.failedStepId ?? '';
-                }
-                // 'stopped' leaves the key alone — pause has just written the
-                // step to it, and Stop has just cleared it.
-
-                // The runner has already filed the problem; this is only the
-                // interruption, for the case where the menu is closed.
-                if (reason === 'error' && error) {
-                    Main.notify('Clickmate', `Macro failed: ${error.message}`);
-                }
-                this._popup?.refresh();
-            },
-        });
         this._recorder = new Recorder(this._daemon, config, {
             onStatus: text => this._onStatus(text),
             onError: error => {
@@ -123,7 +104,10 @@ export default class ClickmateExtension extends Extension {
         this._problemsUnsubscribe = onProblemsChanged(() => this._updateIcon());
         this._updateIcon();
 
-        this._storeUnsubscribe = this._store.onChanged(() => this._popup?.refresh());
+        this._storeUnsubscribe = this._store.onChanged(() => {
+            this._forgetDeletedRunners();
+            this._popup?.refresh();
+        });
         this._settingsChangedId = this._settings.connect('changed', (_settings, key) => {
             this._onSettingChanged(key);
         });
@@ -158,8 +142,8 @@ export default class ClickmateExtension extends Extension {
             GLib.source_remove(this._publishSourceId);
             this._publishSourceId = 0;
         }
-        this._runningPath = [];
-        this._publishRunningPath();
+        this._runningPaths.clear();
+        this._publishRunningPaths();
 
         clearMarker();
         // Nothing is recording once we are gone; a stale "yes" here would leave
@@ -168,7 +152,10 @@ export default class ClickmateExtension extends Extension {
             this._settings.set_string('recording', '');
         }
         this._recorder?.cancel();
-        this._runner?.stop();
+        for (const runner of this._runners.values()) {
+            runner.stop();
+        }
+        this._runners.clear();
         this._recorder?.destroy();
         this._evaluator?.destroy();
         this._popup?.destroy();
@@ -186,7 +173,6 @@ export default class ClickmateExtension extends Extension {
         clearProblems();
         this._store?.destroy();
 
-        this._runner = undefined;
         this._recorder = undefined;
         this._evaluator = undefined;
         this._daemon = undefined;
@@ -209,18 +195,18 @@ export default class ClickmateExtension extends Extension {
 
         this._popup = new MacroPopup({
             store: this._store!,
-            isRunning: () => this._runner?.running ?? false,
-            isPaused: () => this._runner?.paused ?? false,
+            runningMacroIds: () => this._runningMacros().map(([id]) => id),
+            isPaused: () => this._runningMacros().some(([, runner]) => runner.paused),
             isRecording: () => this._recorder?.recording ?? false,
-            resumeStep: () => this._resumeStep,
+            resumeStep: () => this._settings?.get_string('record-into') ?? '',
             onEnabledChanged: enabled => {
                 if (enabled) {
-                    this._runActiveMacro();
+                    this._runEnabled();
                 } else {
-                    this._pauseMacro();
+                    this._pauseAll();
                 }
             },
-            onStop: () => this._stopMacro(),
+            onStop: () => this._stopAll(),
             onOpenPreferences: () => {
                 this._indicator?.menu.close(true);
                 this.openPreferences();
@@ -272,7 +258,7 @@ export default class ClickmateExtension extends Extension {
         if (this._recorder?.busy) {
             this._icon.icon_name = 'media-record-symbolic';
             this._icon.add_style_class_name('clickmate-recording');
-        } else if (this._runner?.running) {
+        } else if (this._runningMacros().length > 0) {
             this._icon.icon_name = 'media-playback-start-symbolic';
             this._icon.remove_style_class_name('clickmate-recording');
         } else if (problems) {
@@ -309,110 +295,236 @@ export default class ClickmateExtension extends Extension {
         this._popup?.setDetail(text);
     }
 
-    private _onRunningChanged(running: boolean): void {
+    private _onRunningChanged(): void {
         this._updateIcon();
         this._popup?.refresh();
     }
 
     /**
-     * Where the runner is, as the chain of steps it is inside. The popup shows it
+     * Where a runner is, as the chain of steps it is inside. The popup shows it
      * as a breadcrumb; preferences, which is a different process, reads the ids
-     * off a settings key and highlights the matching rows.
+     * off a settings key and highlights the matching rows. One chain per running
+     * macro, because there can be several at once.
      */
-    private _onStepsChanged(path: RunningStep[]): void {
-        this._runningPath = path;
-        this._popup?.setDetail(path.map(entry => entry.label).join(' › '));
+    private _onStepsChanged(macroId: string, path: RunningStep[]): void {
+        if (path.length === 0) {
+            this._runningPaths.delete(macroId);
+        } else {
+            this._runningPaths.set(macroId, path);
+        }
+        this._popup?.setDetail(this._breadcrumb());
 
         if (this._publishSourceId) {
             return; // a write is already due; it will pick up this path
         }
         this._publishSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, RUNNING_PUBLISH_MS, () => {
             this._publishSourceId = 0;
-            this._publishRunningPath();
+            this._publishRunningPaths();
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    private _publishRunningPath(): void {
-        // The serial is what makes the write differ: the empty path at the end of
+    /**
+     * What the popup says is happening. With one macro that is just the chain of
+     * steps; with several the name has to come first, or two breadcrumbs on one
+     * line are unreadable.
+     */
+    private _breadcrumb(): string {
+        const named = this._runningPaths.size > 1;
+        return [...this._runningPaths]
+            .map(([macroId, path]) => {
+                const trail = path.map(entry => entry.label).join(' › ');
+                const name = this._store?.getMacro(macroId)?.name;
+                return named && name ? `${name}: ${trail}` : trail;
+            })
+            .join('\n');
+    }
+
+    private _publishRunningPaths(): void {
+        // The serial is what makes the write differ: the empty list at the end of
         // one run is the same string as at the end of the last, and GSettings does
         // not signal an identical value.
         this._settings?.set_string('running-steps', JSON.stringify({
             serial: ++this._publishSerial,
-            steps: this._runningPath.map(entry => entry.id),
+            running: [...this._runningPaths].map(([macro, path]) => ({
+                macro,
+                steps: path.map(entry => entry.id),
+            })),
         }));
     }
 
     // --- actions -----------------------------------------------------------
 
+    /** The runner for this macro, built the first time the macro is run. */
+    private _runnerFor(macroId: string): MacroRunner | null {
+        const existing = this._runners.get(macroId);
+        if (existing) {
+            return existing;
+        }
+        if (!this._daemon || !this._evaluator || !this._settings || !this._store) {
+            return null;
+        }
+        const runner = new MacroRunner(
+            this._daemon, this._evaluator, this._settings, this._store.config, {
+                onStatus: text => this._onStatus(text),
+                onRunningChanged: () => this._onRunningChanged(),
+                onStepsChanged: path => this._onStepsChanged(macroId, path),
+                shouldPause: () => this._isPointerOverMenu(),
+                onFinished: (reason, error) => this._onFinished(macroId, reason, error),
+            });
+        this._runners.set(macroId, runner);
+        return runner;
+    }
+
+    private _onFinished(macroId: string, reason: FinishReason, error?: Error): void {
+        const macro = this._store?.getMacro(macroId);
+        if (reason === 'done' && macro) {
+            // Ran to the end, so there is nothing left to continue from. Only
+            // our own mark: a selection in another macro is where someone is
+            // working, and finishing over here must not move it.
+            if (resolveRunStart(macro.body, this._settings?.get_string('record-into') ?? '')) {
+                this._select(macroId, `end:${macroId}`);
+            }
+        } else if (reason === 'error') {
+            // Select the step that threw: you fix it, then press the shortcut
+            // again rather than replaying everything before it.
+            const failed = this._runners.get(macroId)?.failedStepId;
+            if (failed) {
+                this._select(macroId, `after:${failed}`);
+            }
+        }
+        // 'stopped' leaves the key alone — pause has just written the step to
+        // it, and Stop has just cleared it.
+
+        // The runner has already filed the problem; this is only the
+        // interruption, for the case where the menu is closed.
+        if (reason === 'error' && error) {
+            Main.notify('Clickmate', `“${macro?.name ?? 'Macro'}” failed: ${error.message}`);
+        }
+        this._popup?.refresh();
+    }
+
+    /** Every macro with a runner going right now, as [id, runner]. */
+    private _runningMacros(): [string, MacroRunner][] {
+        return [...this._runners].filter(([, runner]) => runner.running);
+    }
+
+    /** Runners for macros that have since been deleted, gone with them. */
+    private _forgetDeletedRunners(): void {
+        for (const [id, runner] of [...this._runners]) {
+            if (!runner.running && !this._store?.getMacro(id)) {
+                this._runners.delete(id);
+            }
+        }
+    }
+
     /**
-     * The one toggle behind both the shortcut and the popup switch: start, or
-     * pause. Pausing is not a suspend — the run ends — but it writes down the
-     * step it was on, so pressing the shortcut again picks up there instead of
-     * at the top. Stop is the separate action that throws that place away.
+     * The one toggle behind both the shortcut and the popup switch: start every
+     * enabled macro, or pause them. They run alongside each other, taking turns
+     * at the pointer a step at a time.
+     *
+     * Pausing is not a suspend — the runs end — but with a single macro it
+     * writes down the step it was on, so pressing the shortcut again picks up
+     * there instead of at the top. Stop is the separate action that throws that
+     * place away.
      */
-    private _runActiveMacro(): void {
-        const macro = this._store?.activeMacro;
-        if (!macro) {
-            Main.notify('Clickmate', 'No macro selected. Pick one in Settings.');
+    private _runEnabled(): void {
+        const macros = this._store?.enabledMacros ?? [];
+        if (macros.length === 0) {
+            Main.notify('Clickmate', this._store?.macros.length
+                ? 'No macro is switched on. Turn one on in Settings.'
+                : 'No macros yet. Add one in Settings.');
             this._popup?.refresh();
             return;
         }
-        if (this._runner?.running) {
-            this._pauseMacro();
+        if (this._runningMacros().length > 0) {
+            this._pauseAll();
             return;
         }
         this._indicator?.menu.close(true);
         // We just closed it, so the pause check must not still think otherwise.
         this._menuOpen = false;
-        void this._runner?.run(macro, this._resumeStep);
+        for (const macro of macros) {
+            this._runMacro(macro);
+        }
     }
 
-    /** Halt, remembering the step it was on as where to continue from. */
-    private _pauseMacro(): void {
-        if (!this._runner?.running) {
-            return;
+    /** Start one macro, from the selected step when the selection is in it. */
+    private _runMacro(macro: Macro): boolean {
+        const runner = this._runnerFor(macro.id);
+        if (!runner || runner.running) {
+            return false;
         }
-        // Read before stopping: the path is cleared when the run unwinds.
-        this._resumeStep = this._runner.currentStepId;
-        this._runner.stop();
+        void runner.run(macro, this._resumeStepFor(macro));
+        return true;
+    }
+
+    /** Halt everything, remembering where to continue from where that is one place. */
+    private _pauseAll(): void {
+        const running = this._runningMacros();
+        if (running.length === 1) {
+            // Read before stopping: the path is cleared when the run unwinds.
+            const id = running[0][1].currentStepId;
+            if (id) {
+                this._select(running[0][0], `after:${id}`);
+            }
+        }
+        // Several at once are in several places, and there is one mark. Rather
+        // than pick one of them to be wrong about, the next press starts them
+        // all from the top.
+        //
+        // Only the last one tells the daemon: that request is global — it aborts
+        // whatever is being injected and lets go of every held key — so doing it
+        // first would cut into a macro that is still running.
+        running.forEach(([, runner], index) => runner.stop(index === running.length - 1));
         this._popup?.refresh();
     }
 
     /** Halt and forget where we were, so the next run starts at the top. */
-    private _stopMacro(): void {
-        this._resumeStep = '';
-        this._runner?.stop();
+    private _stopAll(): void {
+        this._clearMark();
+        for (const [, runner] of this._runningMacros()) {
+            runner.stop();
+        }
         this._popup?.refresh();
     }
 
     /**
-     * Id of the step the next run starts at; '' means from the beginning. It is
-     * the row selected in the editor, which is also where a recording lands —
-     * one mark for "here", used by both.
+     * Id of the step this macro's run starts at; '' means from the beginning. It
+     * is the row selected in the editor, which is also where a recording lands —
+     * one mark for "here", used by both. A selection in another macro leaves this
+     * one starting at the top, which is what `resolveRunStart` reports.
      */
-    private get _resumeStep(): string {
-        const macro = this._store?.activeMacro;
-        return macro
-            ? resolveRunStart(macro.body, this._settings?.get_string('record-into') ?? '')
-            : '';
+    private _resumeStepFor(macro: Macro): string {
+        return resolveRunStart(macro.body, this._settings?.get_string('record-into') ?? '');
     }
 
-    private set _resumeStep(id: string) {
+    /**
+     * Move the editor's selection to a row of this macro. The two go together:
+     * the row says where in a macro, and the macro is what a recording is added
+     * to, so a mark pointing into one macro while another is the selected one
+     * would send the next recording somewhere the editor is not showing.
+     */
+    private _select(macroId: string, value: string): void {
         if (!this._settings) {
             return;
         }
-        const current = this._settings.get_string('record-into');
-        if (!id && !current.startsWith('after:')) {
-            // Nothing to forget: a body picked for recording is not somewhere a
-            // run was left off, and clearing it would move that choice.
-            return;
+        if (this._store && this._store.activeMacroId !== macroId) {
+            this._store.activeMacroId = macroId;
         }
-        const value = id ? `after:${id}` : '';
-        // Guarded because preferences redraws on every change of this key, and
+        // Guarded because preferences repaints on every change of this key, and
         // most writes here are the same value it already holds.
-        if (current !== value) {
+        if (this._settings.get_string('record-into') !== value) {
             this._settings.set_string('record-into', value);
+        }
+    }
+
+    private _clearMark(): void {
+        const current = this._settings?.get_string('record-into') ?? '';
+        // A body picked for recording is not somewhere a run was left off, so
+        // there is nothing to forget and clearing it would move that choice.
+        if (current.startsWith('after:')) {
+            this._settings?.set_string('record-into', '');
         }
     }
 
@@ -482,18 +594,46 @@ export default class ClickmateExtension extends Extension {
      * session, from a window that has no Stop.
      */
     private async _runOneStep(request: { macroId?: string; stepId?: string }): Promise<object> {
-        if (!this._runner || !this._store) {
+        if (!this._store) {
             return { ok: false, message: 'the extension is not ready yet' };
-        }
-        if (this._runner.running) {
-            return { ok: false, message: 'a macro is running — stop it first' };
         }
         const macro = request.macroId ? this._store.getMacro(request.macroId) : this._store.activeMacro;
         const loc = macro && request.stepId ? findStep(macro.body, request.stepId) : null;
         if (!loc) {
             return { ok: false, message: 'that step is no longer in the macro' };
         }
-        return this._runner.runSingle(loc.step);
+        const runner = this._runnerFor(macro!.id);
+        if (!runner) {
+            return { ok: false, message: 'the extension is not ready yet' };
+        }
+        if (runner.running) {
+            return { ok: false, message: 'this macro is running — stop it first' };
+        }
+        return runner.runSingle(loc.step);
+    }
+
+    /**
+     * Start or stop one macro, because the button beside it in the editor asked.
+     * The panel switch runs everything that is switched on; this is the one you
+     * are looking at, whether it is switched on or not.
+     */
+    private _runOneMacro(request: { macroId?: string; action?: string }): object {
+        const macro = request.macroId ? this._store?.getMacro(request.macroId) : null;
+        if (!macro) {
+            return { ok: false, message: 'that macro is no longer there' };
+        }
+        if (request.action === 'stop') {
+            const runner = this._runners.get(macro.id);
+            // Not a pause: the button says stop, and the editor's selection is
+            // where you are working rather than where this got to.
+            runner?.stop(this._runningMacros().length === 1);
+            this._popup?.refresh();
+            return { ok: true, message: `Stopped “${macro.name}”` };
+        }
+        if (!this._runMacro(macro)) {
+            return { ok: false, message: 'it is already running' };
+        }
+        return { ok: true, message: `Running “${macro.name}”` };
     }
 
     /** Where a recording lands: whichever row the editor has selected. */
@@ -606,8 +746,8 @@ export default class ClickmateExtension extends Extension {
             return;
         }
 
-        if (this._runner?.running) {
-            this._runner.stop();
+        for (const [, runner] of this._runningMacros()) {
+            runner.stop();
         }
 
         // An open shell menu holds the keyboard grab, which would stop you from
@@ -637,7 +777,7 @@ export default class ClickmateExtension extends Extension {
                 this._indicator?.menu.toggle();
                 break;
             case 'run-macro':
-                this._runActiveMacro();
+                this._runEnabled();
                 break;
             case 'record-toggle':
                 void this._toggleRecording();
@@ -649,7 +789,7 @@ export default class ClickmateExtension extends Extension {
                 this._recorder?.cancel();
                 // A full stop, not a pause: the emergency key should leave
                 // nothing armed to carry on from.
-                this._stopMacro();
+                this._stopAll();
                 if (this._recorder?.recording) {
                     void this._recorder.stop();
                 }
@@ -690,6 +830,11 @@ export default class ClickmateExtension extends Extension {
                 'run-step', request => this._runOneStep(request));
             return;
         }
+        if (key === 'run-macro-request') {
+            void this._answerRequest<{ serial?: number; macroId?: string; action?: string }>(
+                'run-macro', request => this._runOneMacro(request));
+            return;
+        }
         if (key === 'show-marker-request') {
             // Purely visual: returning nothing means no answer is written back.
             void this._answerRequest<{ serial?: number; x: number; y: number; w?: number; h?: number }>(
@@ -716,7 +861,9 @@ export default class ClickmateExtension extends Extension {
         }
         this._daemon?.setPaths(config.controlSocket, config.eventSocket);
         this._evaluator?.setConfig(config);
-        this._runner?.setConfig(config);
+        for (const runner of this._runners.values()) {
+            runner.setConfig(config);
+        }
         this._recorder?.setConfig(config);
     }
 

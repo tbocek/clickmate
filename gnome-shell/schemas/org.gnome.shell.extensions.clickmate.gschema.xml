@@ -10,26 +10,32 @@
             <description>All macros, steps and conditions, serialised as JSON</description>
         </key>
 
+        <!-- The macro being worked on, set by clicking a row in the editor. It is
+             where a recording lands and what the capture shortcut adds to. Not
+             what runs: Run starts every macro switched on, which is a flag on the
+             macro itself, inside the document. -->
         <key name="active-macro-id" type="s">
             <default>''</default>
             <summary>Selected macro</summary>
-            <description>Id of the macro the popup and shortcuts act on</description>
+            <description>Id of the macro whose row is selected — where recordings land</description>
         </key>
 
-        <!-- Published by the shell while a macro runs: the chain of step ids the
-             runner is currently inside, outermost first. Preferences highlights
-             them. Carries a serial because two identical writes — the empty path
-             at the end of one run and of the next — would not be signalled. -->
+        <!-- Published by the shell while macros run: for each one, the chain of
+             step ids its runner is currently inside, outermost first. Preferences
+             highlights them, and uses the macro ids to show which are running.
+             Carries a serial because two identical writes — the empty list at the
+             end of one run and of the next — would not be signalled. -->
         <key name="running-steps" type="s">
             <default>''</default>
             <summary>Running steps</summary>
-            <description>Internal: JSON list of the step ids the runner is currently inside</description>
+            <description>Internal: JSON, per running macro, of the step ids its runner is inside</description>
         </key>
 
         <!-- The row selected in the editor: "after:abc123" for a step,
-             "in:abc123:body" for one of its bodies, empty for the end of the
-             macro. It is where a recording lands, and — for a step — where the
-             next run starts, so there is one mark for "here" rather than two.
+             "in:abc123:body" for one of its bodies, "end:macroId" or empty for
+             the end of a macro. It is where a recording lands, and — for a step —
+             where the run of the macro holding it starts, so there is one mark
+             for "here" rather than two.
              The shell writes it too: pausing marks the step it stopped on, a
              failure marks the step that threw, and a run that reaches the end
              clears it. It lives out here rather than in a widget so it survives
@@ -37,7 +43,7 @@
         <key name="record-into" type="s">
             <default>''</default>
             <summary>The selected row</summary>
-            <description>The selected row, as "after:stepId" or "in:stepId:branch", or empty for the end of the macro</description>
+            <description>The selected row, as "after:stepId", "in:stepId:branch" or "end:macroId"</description>
         </key>
 
         <!-- What the shell is watching for, so the editor can go red while it
@@ -88,6 +94,18 @@
             <description>Internal: JSON reporting how that step went</description>
         </key>
 
+        <key name="run-macro-request" type="s">
+            <default>''</default>
+            <summary>Run one macro</summary>
+            <description>Internal: JSON naming a macro the editor wants started or stopped</description>
+        </key>
+
+        <key name="run-macro-result" type="s">
+            <default>''</default>
+            <summary>Run one macro result</summary>
+            <description>Internal: JSON reporting whether it started</description>
+        </key>
+
         <key name="show-marker-request" type="s">
             <default>''</default>
             <summary>Marker request</summary>
@@ -109,8 +127,8 @@
 
         <key name="run-macro" type="as">
             <default><![CDATA[['<Control><Shift>F6']]]></default>
-            <summary>Run or pause the selected macro</summary>
-            <description>Starts the selected macro, or pauses a running one. Pressing it again continues from the step it paused on; Stop in the panel menu goes back to starting at the top.</description>
+            <summary>Run or pause the macros that are switched on</summary>
+            <description>Starts every macro switched on, or pauses them. With one running, pressing it again continues from the step it paused on; Stop in the panel menu goes back to starting at the top.</description>
         </key>
 
         <key name="record-toggle" type="as">
