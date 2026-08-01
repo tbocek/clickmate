@@ -73,6 +73,13 @@
     background-color: rgba(224, 27, 36, 0.12);
 }
 
+/* The area a running check is reading, flashed while it looks. Outline only:
+   a whole-screen check flashes a stage-sized widget, and a filled one would
+   composite a full-screen translucent quad for as long as it shows. */
+.clickmate-marker-flash {
+    border: 3px solid #2ec27e;
+}
+
 .clickmate-marker-label {
     padding: 3px 8px;
     border-radius: 6px;

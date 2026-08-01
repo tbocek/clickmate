@@ -41,13 +41,36 @@ export function clearMarker(): void {
 }
 
 /**
+ * Put marker actors on screen and take them down after `durationMs`, replacing
+ * whatever the slot held: one marker at a time, whichever was asked for last.
+ *
+ * The actors are registered before anything can fail: addChrome parents the
+ * actor and only then validates its options, so a bad call leaves the actor on
+ * screen with nothing tracking it — which is how the marker used to stay until
+ * logout. The expiry is armed first for the same reason: whatever happens
+ * below, the screen goes back to normal on its own.
+ */
+function presentMarker(actors: St.Widget[], durationMs: number): void {
+    clearMarker();
+    markerActors = actors;
+    markerTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
+        markerTimeoutId = 0;   // cleared first: this source is already firing
+        clearMarker();
+        return GLib.SOURCE_REMOVE;
+    });
+    // No options: shell 50 dropped `affectsInputRegion` and derives the input
+    // region from reactivity instead, and no marker actor is reactive.
+    for (const actor of actors) {
+        Main.layoutManager.addChrome(actor);
+    }
+}
+
+/**
  * Briefly draw an X over a screen position, or an outline over a region, so a
  * coordinate in the editor can be checked against the actual screen. Purely
  * visual: it sits above every window and does not take input.
  */
 export function showMarker(x: number, y: number, w?: number, h?: number, durationMs = MARKER_DURATION_MS): void {
-    clearMarker();
-
     const isRegion = typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0;
     const container = new St.Widget({ style_class: 'clickmate-marker', reactive: false });
 
@@ -79,23 +102,24 @@ export function showMarker(x: number, y: number, w?: number, h?: number, duratio
     const labelY = y + (isRegion ? h! : 24) + 6;
     const fits = labelY < global.stage.height - 30;
 
-    // Registered before anything can fail. addChrome parents the actor and only
-    // then validates its options, so a bad call leaves the actor on screen with
-    // nothing tracking it — which is how the marker used to stay until logout.
-    markerActors = [container, label];
-    // The expiry is armed first for the same reason: whatever happens below, the
-    // screen goes back to normal on its own.
-    markerTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, durationMs, () => {
-        markerTimeoutId = 0;   // cleared first: this source is already firing
-        clearMarker();
-        return GLib.SOURCE_REMOVE;
-    });
-
-    // No options: shell 50 dropped `affectsInputRegion` and derives the input
-    // region from reactivity instead, and neither of these actors is reactive.
-    Main.layoutManager.addChrome(container);
-    Main.layoutManager.addChrome(label);
+    presentMarker([container, label], durationMs);
     label.set_position(Math.round(x), Math.round(fits ? labelY : y - 34));
+}
+
+/** How long the flash while a check reads an area stays. */
+const FLASH_DURATION_MS = 1000;
+
+/**
+ * A green outline over the area a running check is reading, gone again within
+ * the second; no region means the whole screen. That convention is resolved
+ * here, where the stage lives, so callers pass a condition's region through.
+ */
+export function flashRegion(region?: Region | null): void {
+    const { x, y, w, h } = region ?? { x: 0, y: 0, w: global.stage.width, h: global.stage.height };
+    const box = new St.Widget({ style_class: 'clickmate-marker-flash', reactive: false });
+    box.set_position(Math.round(x), Math.round(y));
+    box.set_size(Math.round(w), Math.round(h));
+    presentMarker([box], FLASH_DURATION_MS);
 }
 
 /**

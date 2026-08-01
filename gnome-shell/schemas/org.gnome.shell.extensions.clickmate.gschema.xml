@@ -94,6 +94,18 @@
             <description>Internal: JSON reporting how the last capture went</description>
         </key>
 
+        <key name="record-request" type="s">
+            <default>''</default>
+            <summary>Recording request</summary>
+            <description>Internal: JSON asking the shell to start or stop a whole recording</description>
+        </key>
+
+        <key name="record-result" type="s">
+            <default>''</default>
+            <summary>Recording result</summary>
+            <description>Internal: JSON reporting whether the recording started or stopped</description>
+        </key>
+
         <key name="run-step-request" type="s">
             <default>''</default>
             <summary>Run one step</summary>
@@ -131,12 +143,6 @@
             <description>Append the next click or pointer move to the selected macro as a step</description>
         </key>
 
-        <key name="open-popup" type="as">
-            <default><![CDATA[['<Control><Shift>F5']]]></default>
-            <summary>Open the macro popup</summary>
-            <description>Keyboard shortcut that opens the clickmate popup</description>
-        </key>
-
         <key name="run-macro" type="as">
             <default><![CDATA[['<Control><Shift>F6']]]></default>
             <summary>Run or pause the macros that are switched on</summary>
@@ -150,7 +156,7 @@
         </key>
 
         <key name="panic-stop" type="as">
-            <default><![CDATA[['<Super>Escape']]]></default>
+            <default><![CDATA[['<Control><Shift>F5']]]></default>
             <summary>Emergency stop</summary>
             <description>Abort any running macro and release every held key</description>
         </key>

@@ -25,6 +25,8 @@ export interface LlmCondition {
     prompt: string;
     /** null/undefined means "the whole screen". */
     region?: Region | null;
+    /** Flash a green outline over the checked area whenever this check runs. */
+    flash?: boolean;
 }
 
 /**

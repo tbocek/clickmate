@@ -181,11 +181,10 @@ reporting that none was found.
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+Shift+F5` | Open the popup |
+| `Ctrl+Shift+F5` | Emergency stop |
 | `Ctrl+Shift+F6` | Run the macros that are switched on / pause them / continue |
 | `Ctrl+Shift+R` | Start / stop recording into the selected macro |
 | `Ctrl+Shift+M` | Capture one click or move, appended to the selected macro |
-| `Super+Escape` | Emergency stop |
 
 The panel popup holds only a run switch, a **Stop**, what is running, and a
 **Settings** button. It is also where progress shows up: the current step, the

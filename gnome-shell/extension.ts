@@ -25,10 +25,10 @@ import {
 } from './src/model.js';
 import { clearProblems, onProblemsChanged, problemCount, reportProblem } from './src/problems.js';
 import { MacroPopup } from './ui/popup.js';
-import { clearMarker, pickRegion, showMarker } from './ui/overlay.js';
+import { clearMarker, flashRegion, pickRegion, showMarker } from './ui/overlay.js';
 
 const KEYBINDINGS = [
-    'open-popup', 'run-macro', 'record-toggle', 'capture-step', 'panic-stop',
+    'run-macro', 'record-toggle', 'capture-step', 'panic-stop',
 ];
 
 /**
@@ -90,7 +90,7 @@ export default class ClickmateExtension extends Extension {
 
         const config = this._store.config;
         this._daemon = new DaemonClient(config.controlSocket, config.eventSocket);
-        this._evaluator = new ConditionEvaluator(config, trace => this._onTrace(trace));
+        this._evaluator = new ConditionEvaluator(config, trace => this._onTrace(trace), flashRegion);
         this._recorder = new Recorder(this._daemon, config, {
             onStatus: text => this._onStatus(text),
             onError: error => {
@@ -805,14 +805,19 @@ export default class ClickmateExtension extends Extension {
         }
     }
 
-    private async _toggleRecording(): Promise<void> {
+    /**
+     * Start or stop the recording, and say which happened: `recording` is the
+     * state afterwards, `problem` the reason when a start went nowhere. The
+     * shortcut ignores the answer; the request from preferences relays it.
+     */
+    private async _toggleRecording(): Promise<{ recording: boolean; problem?: string }> {
         if (!this._recorder || !this._store) {
-            return;
+            return { recording: false, problem: 'the extension is not ready yet' };
         }
         const macro = this._store.activeMacro;
         if (!macro) {
             Main.notify('Clickmate', 'Create a macro before recording.');
-            return;
+            return { recording: false, problem: 'create a macro before recording' };
         }
 
         if (this._recorder.recording) {
@@ -839,7 +844,7 @@ export default class ClickmateExtension extends Extension {
                 });
                 Main.notify('Clickmate', warning);
             }
-            return;
+            return { recording: false };
         }
 
         for (const [, runner] of this._runningMacros()) {
@@ -853,9 +858,6 @@ export default class ClickmateExtension extends Extension {
         try {
             this._updateIgnoredRecordingKeys();
             await this._recorder.start(lastPointerEndpoint(macro.body));
-            const where = this._recordTarget(macro).where;
-            Main.notify('Clickmate', `Recording into “${macro.name}”${where ? `, ${where}` : ''}. ` +
-                'Press the shortcut again to stop.');
         } catch (error) {
             reportProblem('Recording', `could not start: ${(error as Error).message}`, {
                 hint: 'The daemon has to be running and capturing your devices. ' +
@@ -863,15 +865,18 @@ export default class ClickmateExtension extends Extension {
                 error: error as Error,
             });
             Main.notify('Clickmate', `Could not start recording: ${(error as Error).message}`);
+            this._updateIcon();
+            return { recording: false, problem: (error as Error).message };
         }
+        const where = this._recordTarget(macro).where;
+        Main.notify('Clickmate', `Recording into “${macro.name}”${where ? `, ${where}` : ''}. ` +
+            'Press the shortcut again to stop.');
         this._updateIcon();
+        return { recording: true };
     }
 
     private _onShortcut(name: string): void {
         switch (name) {
-            case 'open-popup':
-                this._indicator?.menu.toggle();
-                break;
             case 'run-macro':
                 this._runEnabled();
                 break;
@@ -923,6 +928,15 @@ export default class ClickmateExtension extends Extension {
         }
         if (key === 'capture-step-request') {
             void this._answerRequest<CaptureTarget>('capture-step', target => this._captureStep(target));
+            return;
+        }
+        if (key === 'record-request') {
+            void this._answerRequest('record', async () => {
+                const outcome = await this._toggleRecording();
+                return outcome.problem
+                    ? { ok: false, message: outcome.problem }
+                    : { ok: true, recording: outcome.recording };
+            });
             return;
         }
         if (key === 'run-step-request') {

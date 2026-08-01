@@ -221,12 +221,20 @@ function debounce(fn: () => void, ms = 400): () => void {
     };
 }
 
-function entryRow(title: string, value: string, onChange: (text: string) => void): Adw.EntryRow {
-    const row = new Adw.EntryRow({ title });
+/** Shared tail of entryRow and passwordRow: the initial text and a debounced commit. */
+function commitOnChange(row: Adw.EntryRow, value: string, onChange: (text: string) => void): Adw.EntryRow {
     row.set_text(value);
-    const commit = debounce(() => onChange(row.get_text() ?? ''));
-    row.connect('changed', commit);
+    row.connect('changed', debounce(() => onChange(row.get_text() ?? '')));
     return row;
+}
+
+function entryRow(title: string, value: string, onChange: (text: string) => void): Adw.EntryRow {
+    return commitOnChange(new Adw.EntryRow({ title }), value, onChange);
+}
+
+/** An entry that masks what is typed with dots, for secrets; the reveal eye is built in. */
+function passwordRow(title: string, value: string, onChange: (text: string) => void): Adw.EntryRow {
+    return commitOnChange(new Adw.PasswordEntryRow({ title }), value, onChange);
 }
 
 function spinRow(
@@ -401,7 +409,10 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     // "end:<macroId>" is the end of a macro, "after:<stepId>" a step,
     // "in:<stepId>:<branch>" a body.
     private _targetRows = new Map<string, Gtk.Widget>();
-    private _recordButtons: Gtk.Button[] = [];
+    private _recordControls: Gtk.Widget[] = [];
+    /** Shared dropdown models: the choices never differ between rows. */
+    private _stepKindsModel?: Gtk.StringList;
+    private _recordChoicesModel?: Gtk.StringList;
     /** The row currently painted as the target, so it can be unpainted. */
     private _markedRow?: Gtk.Widget;
     private _targetChangedId = 0;
@@ -801,7 +812,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         this._targetRows.clear();
         this._markedRow = undefined;
         this._runButtons.clear();
-        this._recordButtons = [];
+        this._recordControls = [];
         this._branchRows.clear();
         this._highlighted = [];
 
@@ -930,13 +941,13 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             row.add_css_class(row instanceof Adw.ExpanderRow ? `${base}-block` : base);
         }
 
-        // The buttons that ask for one captured click cannot work during a whole
+        // The record controls cannot start anything else during a whole
         // recording, and go red rather than dead so the reason is visible.
-        for (const button of this._recordButtons) {
+        for (const control of this._recordControls) {
             if (recording) {
-                button.add_css_class('destructive-action');
+                control.add_css_class('destructive-action');
             } else {
-                button.remove_css_class('destructive-action');
+                control.remove_css_class('destructive-action');
             }
         }
     }
@@ -964,16 +975,23 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     private _selectable(row: Gtk.Widget, target: string, macroId: string): void {
         const click = new Gtk.GestureClick();
         click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE);
-        click.connect('pressed', () => {
-            if (this._store.activeMacroId !== macroId) {
-                this._store.activeMacroId = macroId;
-            }
-            if (this._settings.get_string('record-into') !== target) {
-                this._settings.set_string('record-into', target);
-            }
-        });
+        click.connect('pressed', () => this._selectTarget(macroId, target));
         row.add_controller(click);
         this._targetRows.set(target, row);
+    }
+
+    /**
+     * Make a row's spot the selection: which macro is being worked on, and
+     * where recordings land. Written only on change, so re-selecting the same
+     * row does not churn `changed::` signals.
+     */
+    private _selectTarget(macroId: string, target: string): void {
+        if (this._store.activeMacroId !== macroId) {
+            this._store.activeMacroId = macroId;
+        }
+        if (this._settings.get_string('record-into') !== target) {
+            this._settings.set_string('record-into', target);
+        }
     }
 
     /** What the shell publishes: one chain of step ids per running macro. */
@@ -1034,29 +1052,71 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     /**
      * A dropdown that is also the button: its first entry is the label, and
-     * picking any of the others adds that step there and then. Two clicks for a
-     * step instead of three, and no Add button left sitting next to a dropdown
-     * whose value you already chose.
+     * picking any of the others acts there and then. Two clicks instead of
+     * three, and no button left sitting next to a dropdown whose value you
+     * already chose. The selection snaps back to the label before the action
+     * runs, so the action is free to rebuild the page from under the widget.
+     * `model` is shared between rows — the choices never differ, so one list
+     * serves every rebuild.
      */
-    private _addStepDropdown(into: Step[]): Gtk.DropDown {
-        const model = new Gtk.StringList();
-        model.append(_('Add a step…'));
-        for (const kind of STEP_KINDS) {
-            model.append(STEP_KIND_LABELS[kind]);
-        }
+    private _actionDropdown(model: Gtk.StringList, onPick: (choice: number) => void): Gtk.DropDown {
         const dropdown = new Gtk.DropDown({ model, valign: Gtk.Align.CENTER });
         dropdown.connect('notify::selected', () => {
             const index = dropdown.get_selected();
-            if (index < 1 || index > STEP_KINDS.length || this._rebuilding) {
-                return;   // the title itself, or the page being torn down
+            if (index < 1 || this._rebuilding) {
+                return;   // the label itself, or the page being torn down
             }
-            into.push(newStep(STEP_KINDS[index - 1]));
-            // The rebuild replaces this widget anyway; reset in case it does not
-            // get that far, so the title is what a returning eye sees.
             dropdown.set_selected(0);
-            this._saveAndRebuild();
+            onPick(index - 1);
         });
         return dropdown;
+    }
+
+    private _addStepDropdown(into: Step[]): Gtk.DropDown {
+        if (!this._stepKindsModel) {
+            this._stepKindsModel = new Gtk.StringList();
+            this._stepKindsModel.append(_('Add step…'));
+            for (const kind of STEP_KINDS) {
+                this._stepKindsModel.append(STEP_KIND_LABELS[kind]);
+            }
+        }
+        return this._actionDropdown(this._stepKindsModel, choice => {
+            into.push(newStep(STEP_KINDS[choice]));
+            this._saveAndRebuild();
+        });
+    }
+
+    /**
+     * The "Add step here" row that ends a macro and every nested block: the
+     * dropdown that appends into `into`, and a Record dropdown that captures
+     * one step there or starts a whole recording landing there. `stepId` and
+     * `listKey` name the nested body the row sits in, null for the macro
+     * itself — the selection target is derived from them here, so the two
+     * ways of recording cannot disagree about the spot.
+     */
+    private _addStepRow(into: Step[], macroId: string, stepId: string | null, listKey: string | null): Adw.ActionRow {
+        const target = stepId ? `in:${stepId}:${listKey}` : `end:${macroId}`;
+        const row = new Adw.ActionRow({ title: _('Add step here') });
+        row.add_suffix(this._addStepDropdown(into));
+
+        if (!this._recordChoicesModel) {
+            this._recordChoicesModel = new Gtk.StringList();
+            for (const label of [_('Record…'), _('One step'), _('Multiple steps')]) {
+                this._recordChoicesModel.append(label);
+            }
+        }
+        const record = this._actionDropdown(this._recordChoicesModel, choice => {
+            if (choice === 0) {
+                this._captureStepInto(macroId, stepId, listKey);
+            } else {
+                this._recordInto(macroId, target);
+            }
+        });
+        record.set_tooltip_text(_('One step: click anywhere on screen, or move the pointer and hold still. ' +
+            'Multiple steps: everything until recording is stopped'));
+        this._recordControls.push(record);
+        row.add_suffix(record);
+        return row;
     }
 
     private _buildMacroGroup(macro: Macro): Adw.PreferencesGroup {
@@ -1107,21 +1167,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._save();
         }));
 
-        const addRow = new Adw.ActionRow({
-            title: _('Add a step here'),
-            subtitle: _('Steps and recordings land here'),
-        });
-        const recordButton = new Gtk.Button({
-            label: _('Record one'),
-            tooltip_text: _('Click anywhere on screen, or move the pointer and hold still, to add that as a step'),
-            valign: Gtk.Align.CENTER,
-        });
-        recordButton.connect('clicked', () => this._captureStepInto(macro.id, null, null));
-        this._recordButtons.push(recordButton);
-
+        const addRow = this._addStepRow(macro.body, macro.id, null, null);
         this._selectable(addRow, `end:${macro.id}`, macro.id);
-        addRow.add_suffix(this._addStepDropdown(macro.body));
-        addRow.add_suffix(recordButton);
 
         for (const step of macro.body) {
             for (const widget of this._buildStepWidgets(macro, step)) {
@@ -1354,12 +1401,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             nested.add_css_class(`clickmate-branch-${kind}`);
             this._branchRows.set(`${step.id}:${list.key}`, nested);
 
-            // Worded exactly like the macro's own add row: the two do the same
-            // thing, and reading two different labels suggested they did not.
-            const addNested = new Adw.ActionRow({
-                title: _('Add a step here'),
-                subtitle: _('Steps and recordings land here'),
-            });
+            const addNested = this._addStepRow(list.steps, macro.id, step.id, list.key);
             addNested.set_margin_start(INDENT_PX);   // lines up with the steps below it
             addNested.add_prefix(new Gtk.Image({
                 icon_name: 'list-add-symbolic',
@@ -1368,16 +1410,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             if (inline) {
                 this._selectable(addNested, `in:${step.id}:${list.key}`, macro.id);
             }
-            const nestedRecord = new Gtk.Button({
-                label: _('Record one'),
-                tooltip_text: _('Click anywhere on screen, or move the pointer and hold still, to add that as a step'),
-                valign: Gtk.Align.CENTER,
-            });
-            nestedRecord.connect('clicked', () => this._captureStepInto(macro.id, step.id, list.key));
-            this._recordButtons.push(nestedRecord);
-
-            addNested.add_suffix(this._addStepDropdown(list.steps));
-            addNested.add_suffix(nestedRecord);
 
             for (const child of list.steps) {
                 for (const widget of this._buildStepWidgets(macro, child, INDENT_PX)) {
@@ -1643,7 +1675,11 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                         ? `${condition.region.w}×${condition.region.h} at ${condition.region.x},${condition.region.y}`
                         : _('The whole screen'),
                 });
-                const pick = new Gtk.Button({ label: _('Pick area…'), valign: Gtk.Align.CENTER });
+                const pick = new Gtk.Button({
+                    label: _('Pick'),
+                    tooltip_text: _('Drag a rectangle over the screen to select the area'),
+                    valign: Gtk.Align.CENTER,
+                });
                 pick.connect('clicked', () => this._pickRegionFor(condition));
                 areaRow.add_suffix(pick);
                 if (condition.region) {
@@ -1651,15 +1687,28 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     const show = new Gtk.Button({ label: _('Show'), valign: Gtk.Align.CENTER });
                     show.connect('clicked', () => this._showMarker(region.x, region.y, region.w, region.h));
                     areaRow.add_suffix(show);
-                }
-                if (condition.region) {
-                    const clear = new Gtk.Button({ label: _('Whole screen'), valign: Gtk.Align.CENTER });
+                    const clear = new Gtk.Button({
+                        label: _('Screen'),
+                        tooltip_text: _('Check the whole screen instead'),
+                        valign: Gtk.Align.CENTER,
+                    });
                     clear.connect('clicked', () => {
                         condition.region = null;
                         rebuild();
                     });
                     areaRow.add_suffix(clear);
                 }
+                const flash = new Gtk.ToggleButton({
+                    label: _('Flash'),
+                    active: condition.flash === true,
+                    tooltip_text: _('Flash a green outline over the checked area for a second whenever this check runs'),
+                    valign: Gtk.Align.CENTER,
+                });
+                flash.connect('toggled', () => {
+                    condition.flash = flash.get_active();
+                    save();
+                });
+                areaRow.add_suffix(flash);
                 rows.push(areaRow);
 
                 break;
@@ -1996,7 +2045,12 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     private _askShell(
         name: string,
         payload: object,
-        options: { minimize?: boolean; onResult?: (answer: Record<string, any>) => void } = {},
+        options: {
+            minimize?: boolean;
+            /** With `minimize`, whether this answer brings the window back; default yes. */
+            presentOn?: (answer: Record<string, any>) => boolean;
+            onResult?: (answer: Record<string, any>) => void;
+        } = {},
     ): void {
         const settings = this._settings;
         const serial = ++this._requestSerial;
@@ -2011,11 +2065,17 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 } catch {
                     answer = null;
                 }
-                if (!answer || answer.serial !== serial) {
-                    return; // an older exchange, or someone else's
+                if (!answer || typeof answer.serial !== 'number' || answer.serial < serial) {
+                    return; // unreadable, or an exchange older than ours
                 }
+                // Ours, or a newer one — done either way. Without the newer
+                // case, an exchange the shell never answered would leave this
+                // handler parsing every future result on the key forever.
                 settings.disconnect(handlerId);
-                if (options.minimize) {
+                if (answer.serial > serial) {
+                    return; // a newer exchange overtook this one; its handler answers
+                }
+                if (options.minimize && (options.presentOn?.(answer) ?? true)) {
                     this._window?.present();
                 }
                 options.onResult!(answer);
@@ -2026,6 +2086,26 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._window?.minimize();
         }
         settings.set_string(`${name}-request`, JSON.stringify({ serial, ...payload }));
+    }
+
+    /**
+     * Start a whole recording landing at `target` — the row it was asked from,
+     * made the selection first so the shell agrees on the spot. The window
+     * stays away while the answer is "recording": what is being recorded is
+     * the real screen. It comes back on failure, and when this same control
+     * stopped a recording that was already going.
+     */
+    private _recordInto(macroId: string, target: string): void {
+        this._selectTarget(macroId, target);
+        this._askShell('record', {}, {
+            minimize: true,
+            presentOn: answer => !(answer.ok && answer.recording),
+            onResult: answer => {
+                if (!answer.ok) {
+                    this._toast(`recording failed: ${answer.message ?? 'unknown reason'}`);
+                }
+            },
+        });
     }
 
     /** Watch for one click or move and append it as a step. */
@@ -2146,7 +2226,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             this._settings.set_string('llm-model', text);
         });
         group.add(model);
-        const apiKey = entryRow(_('API key (usually empty locally)'), this._settings.get_string('llm-api-key'), text => {
+        const apiKey = passwordRow(_('API key (usually empty locally)'), this._settings.get_string('llm-api-key'), text => {
             this._settings.set_string('llm-api-key', text);
         });
         group.add(apiKey);
@@ -2251,7 +2331,6 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         });
 
         const shortcuts: [string, string][] = [
-            ['open-popup', _('Open the popup')],
             ['run-macro', _('Run or stop the selected macro')],
             ['record-toggle', _('Start or stop recording')],
             ['capture-step', _('Capture one click or move as a step')],

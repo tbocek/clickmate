@@ -3,7 +3,7 @@
 
 import GLib from 'gi://GLib';
 
-import type { ColorCondition, Condition, LlmCondition } from './model.js';
+import type { ColorCondition, Condition, LlmCondition, Region } from './model.js';
 import { describeCondition } from './model.js';
 import { LlmClient, LlmError, type LlmSettings } from './llm.js';
 import { reportProblem } from './problems.js';
@@ -30,10 +30,21 @@ export class ConditionEvaluator {
     private _llm = new LlmClient();
     private _config: Config;
     private _onTrace?: (trace: EvaluationTrace) => void;
+    private _onFlash?: (region?: Region | null) => void;
 
-    constructor(config: Config, onTrace?: (trace: EvaluationTrace) => void) {
+    /**
+     * `onFlash` shows a check's area on screen, for the conditions that asked
+     * for that; null is the whole screen. A callback because drawing belongs
+     * to the shell UI, and this file also runs under plain gjs in the tests.
+     */
+    constructor(
+        config: Config,
+        onTrace?: (trace: EvaluationTrace) => void,
+        onFlash?: (region?: Region | null) => void,
+    ) {
         this._config = config;
         this._onTrace = onTrace;
+        this._onFlash = onFlash;
     }
 
     setConfig(config: Config): void {
@@ -151,6 +162,12 @@ export class ConditionEvaluator {
                 ? await captureRegion(condition.region.x, condition.region.y, condition.region.w, condition.region.h)
                 : await captureScreen();
             const image = encodeForLlm(pixbuf, this._config.llmMaxWidth);
+            // After the capture — the flash must not be in the picture the
+            // model is asked about — and after the encode, which blocks the
+            // main loop and would sit between the flash and its first paint.
+            if (condition.flash) {
+                this._onFlash?.(condition.region);
+            }
             const verdict = await this._llm.ask(condition.prompt, image, settings);
 
             const detail = `model said ${verdict.match ? 'yes' : 'no'}${verdict.reason ? ` — ${verdict.reason}` : ''} (${verdict.latencyMs}ms)`;
