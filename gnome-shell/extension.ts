@@ -709,22 +709,41 @@ export default class MacroclickwerkExtension extends Extension {
     }
 
     /**
-     * Start or stop one macro, because the button beside it in the editor asked.
-     * The panel switch runs everything that is switched on; this is the one you
-     * are looking at, whether it is switched on or not.
+     * Start, pause or stop one macro, because a button beside it in the editor
+     * asked. The panel switch runs everything that is switched on; this is the
+     * one you are looking at, whether it is switched on or not.
+     *
+     * Pause and stop both end the run — neither suspends anything — and differ
+     * only in what they leave behind: pause writes down the step it got to,
+     * stop throws that place away. It is the same pair the panel offers, where
+     * the switch pauses and the Stop item below it does not.
      */
     private _runOneMacro(request: { macroId?: string; action?: string }): object {
         const macro = request.macroId ? this._store?.getMacro(request.macroId) : null;
         if (!macro) {
             return { ok: false, message: 'that macro is no longer there' };
         }
-        if (request.action === 'stop') {
+        if (request.action === 'stop' || request.action === 'pause') {
             const runner = this._runners.get(macro.id);
-            // Not a pause: the button says stop, and the editor's selection is
-            // where you are working rather than where this got to.
+            const paused = request.action === 'pause';
+            if (paused) {
+                // Read before stopping: the path is cleared as the run unwinds.
+                // Writing it is the whole difference between the two buttons —
+                // ▶ starts at the editor's selection, so leaving the mark here
+                // is what makes the next press continue rather than restart.
+                const id = runner?.currentStepId;
+                if (id) {
+                    this._select(macro.id, `after:${id}`);
+                }
+            } else {
+                this._clearMark();
+            }
             runner?.stop(this._runningMacros().length === 1);
             this._popup?.refresh();
-            return { ok: true, message: `Stopped “${macro.name}”` };
+            return {
+                ok: true,
+                message: paused ? `Paused “${macro.name}”` : `Stopped “${macro.name}”`,
+            };
         }
         if (!this._runMacro(macro)) {
             return { ok: false, message: 'it is already running' };

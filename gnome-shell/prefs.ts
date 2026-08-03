@@ -131,6 +131,22 @@ const mouseButtonLabels = (): Record<MouseButton, string> => ({
     extra: _('Extra'),
 });
 
+/** What a key step can do, in the order it is offered. */
+const KEY_ACTIONS = ['tap', 'down', 'up'] as const;
+
+/**
+ * Built on demand, for the same reason mouseButtonLabels is. One word each,
+ * where the old rows had a sentence: a dropdown is as wide as its longest
+ * entry, and "Press and keep held" made every row in the window wider than it
+ * had room for. The line these sit on already reads "Hold down ctrl+c", so the
+ * sentence was being said twice; the tooltip keeps the long form.
+ */
+const keyActionLabels = (): Record<string, string> => ({
+    tap: _('Press'),
+    down: _('Hold'),
+    up: _('Release'),
+});
+
 /**
  * The kinds worth a play button: one action each, over as soon as it is done.
  * A loop or an `if` would drag its whole body along, and an endless loop would
@@ -321,7 +337,12 @@ function spinSuffix(
         tooltip_text: tooltip,
         valign: Gtk.Align.CENTER,
         numeric: true,
-        width_chars: 4,
+        // Sized to the largest number it can hold, plus a minus sign where
+        // there can be one, but capped: a wait may run to an hour, and a field
+        // sized for 3600000 is a wide field on every row that a wait is not.
+        // Past the cap it scrolls — the value stays whole, only its widest end
+        // is out of view, and that end is the rare one.
+        width_chars: Math.min(5, Math.max(3, `${upper}`.length + (lower < 0 ? 1 : 0))),
     });
     spin.connect('value-changed', () => onChange(spin.get_value_as_int()));
     return spin;
@@ -488,6 +509,8 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
     private _runningChangedId = 0;
     /** The ▶/■ beside each macro's name, by macro id. */
     private _runButtons = new Map<string, Gtk.Button>();
+    /** The Stop beside each ▶, shown only while that macro is running. */
+    private _stopButtons = new Map<string, Gtk.Button>();
 
     // The selected row: click one and a recording goes there, and the macro
     // holding it continues from there. One across the whole page, in whichever
@@ -499,7 +522,6 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
     private _recordControls: Gtk.Widget[] = [];
     /** Shared dropdown models: the choices never differ between rows. */
     private _stepKindsModel?: Gtk.StringList;
-    private _buttonsModel?: Gtk.StringList;
     private _recordChoicesModel?: Gtk.StringList;
     /** The row currently painted as the target, so it can be unpainted. */
     private _markedRow?: Gtk.Widget;
@@ -949,6 +971,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         this._targetRows.clear();
         this._markedRow = undefined;
         this._runButtons.clear();
+        this._stopButtons.clear();
         this._recordControls = [];
         this._branchRows.clear();
         this._highlighted = [];
@@ -1032,13 +1055,20 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         for (const [macroId, button] of this._runButtons) {
             this._setRunButton(button, running.has(macroId));
         }
+        // Nothing to stop until something runs, so the button is not there to
+        // be pressed — the same rule the panel's Stop item follows.
+        for (const [macroId, button] of this._stopButtons) {
+            button.set_visible(running.has(macroId));
+        }
     }
 
     private _setRunButton(button: Gtk.Button, running: boolean): void {
         button.set_icon_name(running
-            ? 'media-playback-stop-symbolic'
+            ? 'media-playback-pause-symbolic'
             : 'media-playback-start-symbolic');
-        button.set_tooltip_text(running ? _('Stop this macro') : _('Run this macro now'));
+        button.set_tooltip_text(running
+            ? _('Pause — the next ▶ continues from where this got to')
+            : _('Run this macro now'));
         if (running) {
             button.add_css_class('macroclickwerk-running-icon');
         } else {
@@ -1263,13 +1293,23 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         });
 
         // Its own ▶, whether it is switched on or not: the switch is about the
-        // next press of Run, this is about now. It turns into a Stop while the
+        // next press of Run, this is about now. It turns into a Pause while the
         // macro is going, which is also how the editor shows that it is — the
         // panel icon is a long way from the window you are looking at.
         const runButton = iconButton('media-playback-start-symbolic',
             _('Run this macro now'),
-            () => this._runMacroNow(macro.id, this._runningMacroIds().includes(macro.id) ? 'stop' : 'run'));
+            () => this._runMacroNow(macro.id,
+                this._runningMacroIds().includes(macro.id) ? 'pause' : 'run'));
         this._runButtons.set(macro.id, runButton);
+
+        // Beside it only while there is something to stop. Both end the run;
+        // the difference is where the next ▶ begins — here, or at the top —
+        // and that is a choice worth two buttons rather than one that guesses.
+        const stopButton = iconButton('media-playback-stop-symbolic',
+            _('Stop — the next ▶ starts from the top'),
+            () => this._runMacroNow(macro.id, 'stop'));
+        stopButton.set_visible(this._runningMacroIds().includes(macro.id));
+        this._stopButtons.set(macro.id, stopButton);
 
         const enabled = new Gtk.Switch({
             active: macroEnabled(macro),
@@ -1295,6 +1335,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
 
         const header = new Gtk.Box({ spacing: 6, valign: Gtk.Align.CENTER });
         header.append(runButton);
+        header.append(stopButton);
         header.append(enabled);
         header.append(remove);
         group.set_header_suffix(header);
@@ -1431,9 +1472,20 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
             branchRows,
         });
 
+        // Settings small enough to read as part of the step's own sentence sit
+        // on its line rather than behind a fold — "Repeat 10×", "Click left @
+        // 840,512", "Press ctrl+c" — and the line says what they are, so they
+        // need no titles of their own. What is left folded is what needs room:
+        // coordinates with a Pick button, text, a list of modifiers.
+        //
+        // The title is the sentence these controls are words of, so it is
+        // rewritten in place rather than by rebuilding the page — a rebuild
+        // would close the dropdown you are still looking at.
+        const retitle = () => row.set_title(this._describe(step));
+        switch (step.kind) {
         // A repeat has exactly one setting, so it lives on the row rather than
         // behind a fold: the count, and a toggle for having no count at all.
-        if (step.kind === 'loop') {
+        case 'loop': {
             // Not the loop's own kind icon, which already sits on this row:
             // repeat-song is the "keep going" variant of the same family.
             const forever = toggleButton('media-playlist-repeat-song-symbolic',
@@ -1452,7 +1504,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
             forever.connect('toggled', () => {
                 step.count = forever.get_active() ? 'forever' : count.get_value_as_int();
                 count.set_visible(!forever.get_active());
-                row.set_title(this._describe(step));
+                retitle();
                 this._save();
             });
             count.connect('value-changed', () => {
@@ -1460,48 +1512,89 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                     return;
                 }
                 step.count = count.get_value_as_int();
-                row.set_title(this._describe(step));
+                retitle();
                 this._save();
             });
             suffixes.append(forever);
             suffixes.append(count);
+            break;
         }
 
         // Same bargain the loop's count makes: a click is a button and a hold,
         // two small controls that are shorter than the fold they were hiding
-        // behind, and they read as the line they sit on — "Click left @ 840,512".
-        if (step.kind === 'click') {
-            if (!this._buttonsModel) {
-                const labels = mouseButtonLabels();
-                this._buttonsModel = new Gtk.StringList();
-                for (const button of MOUSE_BUTTONS) {
-                    this._buttonsModel.append(labels[button]);
-                }
-            }
-            const which = new Gtk.DropDown({
-                model: this._buttonsModel,
-                selected: Math.max(0, MOUSE_BUTTONS.indexOf(step.button)),
-                tooltip_text: _('Which mouse button'),
-                valign: Gtk.Align.CENTER,
-            });
-            which.connect('notify::selected', () => {
-                if (this._rebuilding) {
-                    return;
-                }
-                step.button = MOUSE_BUTTONS[which.get_selected()] ?? 'left';
-                // The title is the sentence this dropdown is a word of, so it
-                // is rewritten in place rather than by rebuilding the page —
-                // a rebuild would close the dropdown you are still looking at.
-                row.set_title(this._describe(step));
-                this._save();
-            });
-            suffixes.append(which);
-
+        // behind, and they read as the line they sit on.
+        case 'click':
+            suffixes.append(chooser(MOUSE_BUTTONS, mouseButtonLabels(), step.button,
+                _('Which mouse button'), value => {
+                    step.button = value;
+                    retitle();
+                    this._save();
+                }));
             suffixes.append(spinSuffix(step.holdMs ?? 20, 0, 10000, 5,
                 _('How long the button stays down, in milliseconds'), value => {
                     step.holdMs = value;
                     this._save();
                 }));
+            break;
+
+        // The same two words a click has, for the same reason: which, and for
+        // how long — "Press ctrl+c", "Hold down shift".
+        case 'key':
+            suffixes.append(chooser(KEY_ACTIONS, keyActionLabels(), step.action,
+                _('Whether to press, hold down, or release'), value => {
+                    step.action = value;
+                    retitle();
+                    this._save();
+                }));
+            suffixes.append(spinSuffix(step.holdMs ?? 20, 0, 10000, 5,
+                _('How long the key stays down, in milliseconds'), value => {
+                    step.holdMs = value;
+                    this._save();
+                }));
+            break;
+
+        case 'text':
+            suffixes.append(spinSuffix(step.delayMs ?? 12, 0, 1000, 1,
+                _('Delay between keys, in milliseconds'), value => {
+                    step.delayMs = value;
+                    this._save();
+                }));
+            break;
+
+        // Both numbers, and the line already reads "Wait 1s ±200ms", so the
+        // card had nothing left to open onto.
+        case 'wait':
+            suffixes.append(spinSuffix(step.ms, 0, 3600000, 100,
+                _('How long to wait, in milliseconds'), value => {
+                    step.ms = value;
+                    retitle();
+                    this._save();
+                }));
+            suffixes.append(spinSuffix(step.jitterMs ?? 0, 0, 600000, 50,
+                _('Vary each wait by up to this much, either way, in milliseconds'), value => {
+                    step.jitterMs = value;
+                    retitle();
+                    this._save();
+                }));
+            break;
+
+        case 'scroll':
+            suffixes.append(spinSuffix(step.dx, -1000, 1000, 1,
+                _('Horizontal scroll clicks'), value => {
+                    step.dx = value;
+                    retitle();
+                    this._save();
+                }));
+            suffixes.append(spinSuffix(step.dy, -1000, 1000, 1,
+                _('Vertical scroll clicks'), value => {
+                    step.dy = value;
+                    retitle();
+                    this._save();
+                }));
+            break;
+
+        default:
+            break;
         }
 
         if (RUNNABLE_ALONE.includes(step.kind)) {
@@ -1660,26 +1753,19 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                 }));
                 break;
 
+            // No rows: both numbers sit on the step's own line, which already
+            // reads "Scroll 3 vertically".
             case 'scroll':
-                rows.push(this._numbersRow(_('Clicks (horizontal, vertical)'), [step.dx, step.dy], ([dx, dy]) => {
-                    step.dx = dx;
-                    step.dy = dy;
-                    save();
-                }));
                 break;
 
             case 'key':
+                // Action and hold are not here: they sit on the step's own
+                // line, the way a click's button and hold do.
                 rows.push(entryRow(_('Key (evdev name, e.g. KEY_E)'), step.code, text => {
                     const upper = text.trim().toUpperCase();
                     step.code = upper.startsWith('KEY_') ? upper : `KEY_${upper}`;
                     save();
                 }));
-                rows.push(comboRow(_('Action'), ['tap', 'down', 'up'] as const,
-                    { tap: _('Press and release'), down: _('Press and keep held'), up: _('Release') },
-                    step.action, value => {
-                        step.action = value;
-                        rebuild();
-                    }));
                 rows.push(entryRow(_('Modifiers (space separated)'), (step.mods ?? []).join(' '), text => {
                     step.mods = text.split(/[\s,+]+/).filter(Boolean).map(name => {
                         const upper = name.toUpperCase();
@@ -1687,32 +1773,19 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                     });
                     save();
                 }));
-                rows.push(spinRow(_('Hold (ms)'), step.holdMs ?? 20, 0, 10000, 5, value => {
-                    step.holdMs = Math.round(value);
-                    save();
-                }));
                 break;
 
             case 'text':
+                // Delay is not here: it sits on the step's own line.
                 rows.push(entryRow(_('Text'), step.value, text => {
                     step.value = text;
                     save();
                 }));
-                rows.push(spinRow(_('Delay between keys (ms)'), step.delayMs ?? 12, 0, 1000, 1, value => {
-                    step.delayMs = Math.round(value);
-                    save();
-                }));
                 break;
 
+            // No rows: the wait and its variation are both on the step's own
+            // line, which already reads "Wait 1s ±200ms".
             case 'wait':
-                rows.push(spinRow(_('Wait (ms)'), step.ms, 0, 3600000, 100, value => {
-                    step.ms = Math.round(value);
-                    save();
-                }));
-                rows.push(spinRow(_('Random variation (± ms)'), step.jitterMs ?? 0, 0, 600000, 50, value => {
-                    step.jitterMs = Math.round(value);
-                    save();
-                }));
                 break;
 
             // No rows: a repeat's count sits on the row itself, which is what
@@ -2341,7 +2414,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
      * clicks on, it is not meant to be this window. It comes back only if the
      * shell says no, because a message behind a minimised window is no message.
      */
-    private _runMacroNow(macroId: string, action: 'run' | 'stop'): void {
+    private _runMacroNow(macroId: string, action: 'run' | 'pause' | 'stop'): void {
         this._save();   // the shell runs what is in the document, not what is on screen
         if (action === 'run') {
             this._window?.minimize();
