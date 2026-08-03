@@ -1,0 +1,282 @@
+{
+  "version": 1,
+  "macros": [
+    {
+      "id": "b30dbc9e-2702-49cf-8c12-d66a2e1b5975",
+      "name": "Ready",
+      "enabled": true,
+      "body": [
+        {
+          "id": "a3134473-0d18-47bf-be73-4f4468f46926",
+          "kind": "loop",
+          "count": "forever",
+          "body": [
+            {
+              "id": "b6937ffc-88a1-4584-8edb-46e0b09bc2c3",
+              "kind": "if",
+              "cond": {
+                "type": "llm",
+                "prompt": "there is a green button with the label ready",
+                "region": {
+                  "x": 938,
+                  "y": 414,
+                  "w": 194,
+                  "h": 82
+                },
+                "flash": true
+              },
+              "then": [
+                {
+                  "id": "ebcf7682-6f78-40e2-9141-a3f1a2b13e00",
+                  "kind": "click",
+                  "button": "left",
+                  "mode": "abs",
+                  "x": 1012,
+                  "y": 444,
+                  "holdMs": 20
+                },
+                {
+                  "id": "a226d9fc-17b2-44d8-a88b-99b73244ab5d",
+                  "kind": "loop",
+                  "count": "forever",
+                  "body": [
+                    {
+                      "id": "d1fe0ec2-47b6-48b2-aa7e-7f3f9e8f1cec",
+                      "kind": "wait",
+                      "ms": 500,
+                      "jitterMs": 50
+                    },
+                    {
+                      "id": "081eea6e-d03c-4ca0-a21c-7d7e1486655f",
+                      "kind": "if",
+                      "cond": {
+                        "type": "llm",
+                        "prompt": "The player has over $900",
+                        "region": {
+                          "x": 1549,
+                          "y": 362,
+                          "w": 366,
+                          "h": 53
+                        },
+                        "flash": true
+                      },
+                      "then": [
+                        {
+                          "id": "f9ed2c76-505f-4163-8084-83173ff81d8d",
+                          "kind": "key",
+                          "code": "KEY_2",
+                          "action": "tap",
+                          "mods": [],
+                          "holdMs": 0
+                        },
+                        {
+                          "id": "5f269c21-0126-4b75-bbea-278173b50732",
+                          "kind": "click",
+                          "button": "left",
+                          "mode": "abs",
+                          "x": 1029,
+                          "y": 682,
+                          "holdMs": 20
+                        },
+                        {
+                          "id": "b44f0262-c959-4347-be73-e8edfb756390",
+                          "kind": "loop",
+                          "count": "forever",
+                          "body": [
+                            {
+                              "id": "62ad2cd4-93bc-4d3d-a460-7fe09e4adaaa",
+                              "kind": "if",
+                              "cond": {
+                                "type": "llm",
+                                "prompt": "there is a pryomancer",
+                                "region": {
+                                  "x": 644,
+                                  "y": 886,
+                                  "w": 281,
+                                  "h": 231
+                                }
+                              },
+                              "then": [],
+                              "else": [
+                                {
+                                  "id": "d766815c-1cec-4cf3-a201-14aab3b2929b",
+                                  "kind": "click",
+                                  "button": "left",
+                                  "mode": "abs",
+                                  "x": 1029,
+                                  "y": 683,
+                                  "holdMs": 20
+                                }
+                              ]
+                            },
+                            {
+                              "id": "fb786c37-9303-4978-9653-fca6849e4938",
+                              "kind": "if",
+                              "cond": {
+                                "type": "llm",
+                                "prompt": "is this area green",
+                                "region": {
+                                  "x": 933,
+                                  "y": 912,
+                                  "w": 335,
+                                  "h": 118
+                                },
+                                "flash": true
+                              },
+                              "then": [
+                                {
+                                  "id": "4751a198-379d-4114-891d-6fff1255ee11",
+                                  "kind": "key",
+                                  "code": "KEY_E",
+                                  "action": "tap",
+                                  "mods": [],
+                                  "holdMs": 20
+                                }
+                              ],
+                              "else": [
+                                {
+                                  "id": "7502738f-bc58-407c-8a98-a708a2c7e117",
+                                  "kind": "wait",
+                                  "ms": 1000,
+                                  "jitterMs": 0
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ],
+                      "else": [
+                        {
+                          "id": "9e4260f4-335d-4eca-ba3e-7ad7b0a6220b",
+                          "kind": "wait",
+                          "ms": 1000,
+                          "jitterMs": 0
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "else": [
+                {
+                  "id": "fedb7220-9044-4ae3-b1ce-46b1e6489c4a",
+                  "kind": "wait",
+                  "ms": 1000,
+                  "jitterMs": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dfc18f5f-e9d3-40d1-a643-1379180429e0",
+      "name": "Restart",
+      "enabled": true,
+      "body": [
+        {
+          "id": "c68b82e4-3ba3-4e98-aebc-cc37af191b96",
+          "kind": "loop",
+          "count": "forever",
+          "body": [
+            {
+              "id": "f4f51b67-ea59-4296-96c6-005fbe322f63",
+              "kind": "if",
+              "cond": {
+                "type": "llm",
+                "prompt": "Is there a green restart button",
+                "region": {
+                  "x": 698,
+                  "y": 1126,
+                  "w": 248,
+                  "h": 52
+                },
+                "flash": true
+              },
+              "then": [
+                {
+                  "id": "61b2713c-49d3-4a87-8872-0b686bf6133c",
+                  "kind": "click",
+                  "button": "left",
+                  "mode": "abs",
+                  "x": 820,
+                  "y": 1146,
+                  "holdMs": 20
+                },
+                {
+                  "id": "61c96b61-7bf0-43f1-8dde-8794cbc7ac7d",
+                  "kind": "wait",
+                  "ms": 3000,
+                  "jitterMs": 0
+                },
+                {
+                  "id": "30cd394a-c4fa-4de8-bbdc-ce28679c5e7c",
+                  "kind": "start",
+                  "macro": "b30dbc9e-2702-49cf-8c12-d66a2e1b5975",
+                  "at": ""
+                }
+              ],
+              "else": [
+                {
+                  "id": "038231dc-6874-4801-8aa9-23c47d997cdf",
+                  "kind": "wait",
+                  "ms": 1000,
+                  "jitterMs": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "b7e5fdb1-8593-4d62-ba6b-bb0efb25ece8",
+      "name": "Skip Wave",
+      "enabled": true,
+      "body": [
+        {
+          "id": "492e73df-cb4a-4b4a-b6be-dd7bd26613f3",
+          "kind": "loop",
+          "count": "forever",
+          "body": [
+            {
+              "id": "dfe72ad6-91d8-41bc-80e7-cf6ef4299deb",
+              "kind": "if",
+              "cond": {
+                "type": "llm",
+                "prompt": "there is a button skip wave with a green checkmark",
+                "region": {
+                  "x": 793,
+                  "y": 407,
+                  "w": 331,
+                  "h": 89
+                },
+                "flash": true
+              },
+              "then": [
+                {
+                  "id": "580006f3-8131-4e9b-a2ac-5d3fb6fc2689",
+                  "kind": "click",
+                  "button": "left",
+                  "mode": "abs",
+                  "x": 1026,
+                  "y": 434,
+                  "holdMs": 20
+                }
+              ],
+              "else": [
+                {
+                  "id": "6146d543-e80b-4887-861d-7313d86a9feb",
+                  "kind": "wait",
+                  "ms": 1000,
+                  "jitterMs": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
