@@ -6,6 +6,7 @@ import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
+import Pango from 'gi://Pango';
 
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
@@ -349,8 +350,34 @@ function spinSuffix(
 }
 
 /**
+ * A label factory for GtkDropDown. The button and the popup want different
+ * things from the same strings — the button must not grow the window, the list
+ * must stay readable — so each gets its own.
+ */
+function labelFactory(forButton: boolean, maxChars: number): Gtk.SignalListItemFactory {
+    const factory = new Gtk.SignalListItemFactory();
+    factory.connect('setup', (_f, item: Gtk.ListItem) => {
+        item.set_child(new Gtk.Label({
+            xalign: forButton ? 1 : 0,
+            ellipsize: forButton ? Pango.EllipsizeMode.END : Pango.EllipsizeMode.NONE,
+            max_width_chars: forButton ? maxChars : -1,
+        }));
+    });
+    factory.connect('bind', (_f, item: Gtk.ListItem) => {
+        const label = item.get_child() as Gtk.Label;
+        label.set_label((item.get_item() as Gtk.StringObject).get_string() ?? '');
+    });
+    return factory;
+}
+
+/**
  * The chooser half of comboRow, without the row, for when it belongs beside
  * another setting instead of on a line of its own. Same change tracking.
+ *
+ * A dropdown is as wide as its widest entry, and these sit on rows that are
+ * already full, so the button is capped and ellipsized — a macro called
+ * something long, or a step described at length, would otherwise set the width
+ * of the whole window. The popup still shows every label whole.
  */
 function chooser<T extends string>(
     options: readonly T[],
@@ -358,6 +385,7 @@ function chooser<T extends string>(
     selected: T,
     tooltip: string,
     onChange: (value: T) => void,
+    maxChars = 22,
 ): Gtk.DropDown {
     const model = new Gtk.StringList();
     for (const option of options) {
@@ -368,6 +396,8 @@ function chooser<T extends string>(
         selected: Math.max(0, options.indexOf(selected)),
         tooltip_text: tooltip,
         valign: Gtk.Align.CENTER,
+        factory: labelFactory(true, maxChars),
+        list_factory: labelFactory(false, maxChars),
     });
     let current = selected;
     dropdown.connect('notify::selected', () => {
@@ -1406,8 +1436,13 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         const parts: string[] = [];
         if (step.kind === 'loop') {
             // The body hangs off this row rather than off a header of its own,
-            // so this line is the one that has to say what is in it.
-            parts.push(`${this._countLabel(step.body.length)} — ${_(BRANCH_STYLE.body.hint)}`);
+            // so this line is the one that has to say what is in it. An empty
+            // one says what will happen too: the runner skips it, and finding
+            // that out here beats finding it out from a macro that does
+            // nothing.
+            parts.push(step.body.length === 0
+                ? `${_('empty — this repeat is skipped')} — ${_(BRANCH_STYLE.body.hint)}`
+                : `${this._countLabel(step.body.length)} — ${_(BRANCH_STYLE.body.hint)}`);
         } else if (step.kind === 'if') {
             // No first, in the order the two blocks are drawn below it.
             parts.push(`${this._countLabel((step.else ?? []).length)} ${_('else')}, ` +
@@ -1441,7 +1476,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         // A card that opens onto nothing is a card that should not open. Steps
         // with settings of their own keep the expander; the rest — a break, a
         // stop — are one line, and clicking them only selects them.
-        const fields = this._buildStepFields(macro, step);
+        const fields = this._buildStepFields(step);
         const props = { title: this._describe(step), subtitle: this._stepSubtitle(step) };
         const row: Adw.ActionRow | Adw.ExpanderRow = fields.length > 0 || inline
             ? this._expander(stepKey, props,
@@ -1578,6 +1613,13 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                 }));
             break;
 
+        case 'start':
+        case 'stop':
+            for (const widget of this._startStopChoosers(macro, step, retitle)) {
+                suffixes.append(widget);
+            }
+            break;
+
         case 'scroll':
             suffixes.append(spinSuffix(step.dx, -1000, 1000, 1,
                 _('Horizontal scroll clicks'), value => {
@@ -1698,11 +1740,10 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         return widgets;
     }
 
-    private _buildStepFields(macro: Macro, step: Step): Gtk.Widget[] {
+    private _buildStepFields(step: Step): Gtk.Widget[] {
         const condKey = `step:${step.id}:cond`;
         const rows: Gtk.Widget[] = [];
         const save = () => this._save();
-        const rebuild = () => this._saveAndRebuild();
 
         switch (step.kind) {
             case 'click':
@@ -1800,72 +1841,83 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                 }, condKey));
                 break;
 
+            // No rows: which macro and where in it are both on the step's own
+            // line, which already reads Start “Ready”.
             case 'start':
-            case 'stop': {
-                // Every macro but this one, and "this one" as the first choice —
-                // a start pointing here is a restart, a stop pointing here ends
-                // the run, and both are worth having without picking a name.
-                const others = this._store.macros.filter(other => other.id !== macro.id);
-                // A macro that has since been deleted is not a choice any more,
-                // so the step falls back to meaning itself rather than naming a
-                // macro that is not there.
-                if (step.macro && !others.some(other => other.id === step.macro)) {
-                    step.macro = '';
-                }
-                const options = ['', ...others.map(other => other.id)];
-                // "From the top" used to live in this label; the At step row
-                // says it now, and can say otherwise.
-                const labels: Record<string, string> = {
-                    '': _('This macro'),
-                };
-                for (const other of others) {
-                    labels[other.id] = other.name;
-                }
-                rows.push(comboRow(_('Which macro'), options, labels, step.macro ?? '', value => {
-                    step.macro = value;
-                    // Whatever step was chosen belonged to the previous macro.
-                    step.at = '';
-                    // The title says which macro, so it has to be redrawn.
-                    rebuild();
-                }));
-
-                if (step.kind === 'start') {
-                    // The steps of whichever macro is being started, indented
-                    // the way the editor nests them, so the list reads as the
-                    // macro does.
-                    const target = step.macro
-                        ? others.find(other => other.id === step.macro)
-                        : macro;
-                    const stepIds = [''];
-                    const stepLabels: Record<string, string> = { '': _('From the top') };
-                    walk(target?.body ?? [], loc => {
-                        // Not this step itself: starting at it would only run it
-                        // again, and again.
-                        if (loc.step.id === step.id) {
-                            return;
-                        }
-                        stepIds.push(loc.step.id);
-                        stepLabels[loc.step.id] = `${'    '.repeat(loc.depth)}${this._describe(loc.step)}`;
-                    });
-                    // A step that has since been deleted is not a choice any
-                    // more; the top is the fallback the runner uses anyway.
-                    if (step.at && !stepIds.includes(step.at)) {
-                        step.at = '';
-                    }
-                    rows.push(comboRow(_('At step'), stepIds, stepLabels, step.at ?? '', value => {
-                        step.at = value;
-                        // The title names the step, so it has to be redrawn.
-                        rebuild();
-                    }));
-                }
+            case 'stop':
                 break;
-            }
 
             default:
                 break;
         }
 
         return rows;
+    }
+
+    /**
+     * The two choices a start or a stop makes — which macro, and where in it —
+     * as controls for the step's own line. Both lists are built fresh each
+     * time: the macros as they are now, and the steps of whichever macro is
+     * named. Picking a macro rebuilds the page rather than only the title,
+     * because the other dropdown is a list of that macro's steps.
+     */
+    private _startStopChoosers(
+        macro: Macro,
+        step: Extract<Step, { kind: 'start' | 'stop' }>,
+        retitle: () => void,
+    ): Gtk.Widget[] {
+        // Every macro but this one, and "this one" as the first choice — a
+        // start pointing here is a restart, a stop pointing here ends the run,
+        // and both are worth having without picking a name.
+        const others = this._store.macros.filter(other => other.id !== macro.id);
+        // A macro that has since been deleted is not a choice any more, so the
+        // step falls back to meaning itself rather than naming a macro that is
+        // not there.
+        if (step.macro && !others.some(other => other.id === step.macro)) {
+            step.macro = '';
+        }
+        const options = ['', ...others.map(other => other.id)];
+        const labels: Record<string, string> = { '': _('This macro') };
+        for (const other of others) {
+            labels[other.id] = other.name;
+        }
+        const widgets: Gtk.Widget[] = [
+            chooser(options, labels, step.macro ?? '', _('Which macro'), value => {
+                step.macro = value;
+                // Whatever step was chosen belonged to the previous macro.
+                step.at = '';
+                this._saveAndRebuild();
+            }),
+        ];
+
+        if (step.kind === 'start') {
+            // The steps of whichever macro is being started, indented the way
+            // the editor nests them, so the list reads as the macro does.
+            const target = step.macro ? others.find(other => other.id === step.macro) : macro;
+            const stepIds = [''];
+            const stepLabels: Record<string, string> = { '': _('From the top') };
+            walk(target?.body ?? [], loc => {
+                // Not this step itself: starting at it would only run it again,
+                // and again.
+                if (loc.step.id === step.id) {
+                    return;
+                }
+                stepIds.push(loc.step.id);
+                stepLabels[loc.step.id] = `${'    '.repeat(loc.depth)}${this._describe(loc.step)}`;
+            });
+            // A step that has since been deleted is not a choice any more; the
+            // top is the fallback the runner uses anyway.
+            if (step.at && !stepIds.includes(step.at)) {
+                step.at = '';
+            }
+            widgets.push(chooser(stepIds, stepLabels, step.at ?? '', _('Where in it to begin'), value => {
+                step.at = value;
+                retitle();
+                this._save();
+            }));
+        }
+
+        return widgets;
     }
 
     private _buildConditionSection(

@@ -110,6 +110,13 @@ export class MacroRunner {
     private _prevPointer: { x: number; y: number } | null = null;
     /** Set by a 'store' move: 'prev' then means that spot, not the last excursion. */
     private _prevPinned = false;
+    /**
+     * Empty repeats already complained about, by step id. Per run, and per step
+     * rather than one flag for all of them: an empty repeat inside a loop would
+     * otherwise say it thousands of times, and two different empty repeats are
+     * two different things to fix.
+     */
+    private _warnedEmptyLoops = new Set<string>();
 
     constructor(
         daemon: DaemonClient,
@@ -195,6 +202,7 @@ export class MacroRunner {
         this._macroId = macro.id;
         this._prevPointer = null;
         this._prevPinned = false;
+        this._warnedEmptyLoops.clear();
         this._resume = resumeAt ? pathToStep(macro.body, resumeAt) : [];
         this._callbacks.onRunningChanged?.(true);
 
@@ -258,6 +266,7 @@ export class MacroRunner {
         // left over from whichever full run happened to finish last.
         this._prevPointer = null;
         this._prevPinned = false;
+        this._warnedEmptyLoops.clear();
         this._callbacks.onRunningChanged?.(true);
         let result: { ok: boolean; message: string };
         try {
@@ -401,6 +410,27 @@ export class MacroRunner {
                 return 'normal';
 
             case 'loop': {
+                // A repeat with nothing in it can only spin: each pass does no
+                // work, so the next one cannot come out differently, and a
+                // forever one would sit there for the rest of the session
+                // holding the compositor's frames down with it. Skipped rather
+                // than entered — an empty body is nearly always a step that was
+                // meant to go inside it and landed beside it instead, and a
+                // wedged desktop is a poor way to find that out.
+                if (step.body.length === 0) {
+                    if (!this._warnedEmptyLoops.has(step.id)) {
+                        this._warnedEmptyLoops.add(step.id);
+                        this._status('Skipped a repeat with nothing in it');
+                        reportProblem('Step', 'a repeat has nothing in it, so it was skipped', {
+                            where: this._where(),
+                            hint: 'Steps go inside a repeat by being added under it — use the ' +
+                                'arrows to move a step into an open body. A repeat that stays ' +
+                                'empty runs nothing, and forever would never end.',
+                        });
+                    }
+                    return 'normal';
+                }
+
                 let iteration = 0;
                 for (;;) {
                     if (this._cancelled) {

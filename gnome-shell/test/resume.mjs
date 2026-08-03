@@ -2,8 +2,11 @@
 // evaluator real questions; both are stubbed here so the only thing under test
 // is which steps a run visits, and in what order.
 
+import GLib from 'gi://GLib';
+
 import { MacroRunner } from '../dist/src/runner.js';
 import { newMacro, newStep, pathToStep } from '../dist/src/model.js';
+import { clearProblems, listProblems } from '../dist/src/problems.js';
 
 let failures = 0;
 const check = (name, cond, extra = '') => {
@@ -318,6 +321,49 @@ check('pathToStep of a missing step is empty', pathToStep(flat.body, 'gone').len
     check('a macro that is not there is reported, not swallowed',
           typeof failed.problem === 'string' && failed.problem.includes('no longer there'),
           String(failed.problem));
+}
+
+// --- a repeat with nothing in it -------------------------------------------
+
+// The shape that wedged a desktop: a forever repeat whose body is empty, with
+// the steps that were meant to go in it sitting beside it instead. Entering it
+// never returns, so the run has to step over it and say why.
+{
+    const empty = newMacro('empty repeat');
+    const spin = named('loop', 'spin');
+    spin.count = 'forever';
+    const next = named('key', 'next');
+    empty.body.push(spin, next);
+
+    // A real timeout, because the failure mode under test is "never finishes":
+    // without the skip this await would still be pending at logout.
+    const finished = await Promise.race([
+        trace(empty).then(result => result.seen),
+        new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000,
+            () => (resolve('TIMED OUT'), GLib.SOURCE_REMOVE))),
+    ]);
+    check('an empty forever repeat does not spin', finished !== 'TIMED OUT', finished);
+    check('and the run carries on past it', finished === 'spin next', finished);
+
+    const complaint = listProblems().find(p => p.message.includes('nothing in it'));
+    check('and it is reported rather than passed over in silence',
+          complaint !== undefined, JSON.stringify(listProblems().map(p => p.message)));
+
+    // Reported once per repeat per run, not once per pass: an empty repeat
+    // nested in a real one used to be thousands of identical lines.
+    const outer = newMacro('nested empty repeat');
+    const rounds = named('loop', 'rounds');
+    rounds.count = 5;
+    const inner = named('loop', 'inner');
+    inner.count = 'forever';
+    rounds.body.push(inner);
+    outer.body.push(rounds);
+    clearProblems();
+    await trace(outer);
+    const counted = listProblems().find(p => p.message.includes('nothing in it'));
+    check('and said once per run, however many passes reach it',
+          counted !== undefined && counted.count === 1,
+          `count ${counted?.count}`);
 }
 
 print(failures === 0 ? '\nALL PASSED' : `\n${failures} FAILURES`);
