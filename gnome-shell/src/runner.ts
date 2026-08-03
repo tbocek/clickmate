@@ -103,6 +103,11 @@ export class MacroRunner {
      * only the first pass through each list is affected.
      */
     private _resume: string[] = [];
+    /**
+     * Where the pointer was before the last positioned step, which is what a
+     * step aimed at 'prev' goes back to. Per run: a fresh run has no history.
+     */
+    private _prevPointer: { x: number; y: number } | null = null;
 
     constructor(
         daemon: DaemonClient,
@@ -186,6 +191,7 @@ export class MacroRunner {
         this._failedAt = '';
         this._failedStepId = '';
         this._macroId = macro.id;
+        this._prevPointer = null;
         this._resume = resumeAt ? pathToStep(macro.body, resumeAt) : [];
         this._callbacks.onRunningChanged?.(true);
 
@@ -245,6 +251,9 @@ export class MacroRunner {
         this._cancelled = false;
         this._path = [];
         this._failedAt = '';
+        // The ▶ button is not a run: "@ previous" must not consume history
+        // left over from whichever full run happened to finish last.
+        this._prevPointer = null;
         this._callbacks.onRunningChanged?.(true);
         let result: { ok: boolean; message: string };
         try {
@@ -490,15 +499,15 @@ export class MacroRunner {
             { dt: hold, type: EV_KEY, code, value: 0 },
         ], via);
 
-        if (step.mode !== 'abs') {
+        if (step.mode === 'current') {
             await press();
             return;
         }
         // Getting there and clicking are one thing: a click that lands where the
-        // walk left off is the whole point, and another macro nudging the pointer
+        // move left off is the whole point, and another macro nudging the pointer
         // between the two would land it somewhere else entirely.
         await this._daemon.exclusive(async lease => {
-            await this._moveAbs(step.x ?? 0, step.y ?? 0, lease);
+            await this._moveToTarget(step, lease);
             if (this._cancelled) {
                 return;
             }
@@ -507,12 +516,33 @@ export class MacroRunner {
     }
 
     private async _doMove(step: MoveStep): Promise<void> {
-        if (step.mode === 'abs') {
-            // Only the walk to hold together here — there is nothing after it.
-            await this._daemon.exclusive(lease => this._moveAbs(step.x ?? 0, step.y ?? 0, lease));
+        if (step.mode === 'rel') {
+            await this._playRelative(step.dx ?? 0, step.dy ?? 0);
             return;
         }
-        await this._playRelative(step.dx ?? 0, step.dy ?? 0);
+        // Only the move to hold together here — there is nothing after it.
+        await this._daemon.exclusive(lease => this._moveToTarget(step, lease));
+    }
+
+    /**
+     * Move to where a positioned step is headed: its own coordinates, or for
+     * 'prev' the position stored before the last positioned step — the pointer
+     * put back where it was before the macro reached over. Every positioned
+     * step remembers the spot it leaves, latest writer wins, so the store sits
+     * here at the one place steps actually move. A 'prev' before any excursion
+     * has nowhere to go and stays put, which for a click means clicking where
+     * the pointer already is.
+     */
+    private async _moveToTarget(step: ClickStep | MoveStep, lease: Playback): Promise<void> {
+        const target = step.mode === 'prev'
+            ? this._prevPointer
+            : { x: step.x ?? 0, y: step.y ?? 0 };
+        if (!target) {
+            return;
+        }
+        const [px, py] = global.get_pointer();
+        this._prevPointer = { x: px, y: py };
+        await this._moveAbs(target.x, target.y, lease);
     }
 
     private async _playRelative(dx: number, dy: number, via?: Playback): Promise<void> {

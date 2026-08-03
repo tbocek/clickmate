@@ -236,6 +236,22 @@ check('pathToStep of a missing step is empty', pathToStep(flat.body, 'gone').len
     check('nothing played between its nudges and its click',
           /^s*m+c+s*$/.test(trace), trace);
     check('and it took several passes to get there', trace.indexOf('c') > 2, trace);
+
+    // A click "@ previous" undoes the excursion: back to where the pointer
+    // was before the last positioned step, then the click.
+    pointer = [5, 0];
+    const excursion = newMacro('excursion');
+    const away = newStep('click');
+    away.x = 100;
+    away.y = 0;
+    const back = newStep('click');
+    back.mode = 'prev';
+    excursion.body.push(away, back);
+    await start(excursion);
+    // Within 2: the relative-walk fallback under test stops at a rounded
+    // delta of 1, so its true distance can be up to 1.5.
+    check('a click @ previous returns to where the excursion began',
+          Math.abs(pointer[0] - 5) <= 2, String(pointer));
 }
 
 // --- starting and stopping other macros ------------------------------------

@@ -46,6 +46,12 @@ repeat forever:
 - **Record straight into a loop body** — click the row a recording should land
   on, and watch it go red while the recording runs. The same selection is where
   a run continues from: one mark for “here”.
+- **Macros that drive each other** — a `start` step restarts a macro from the
+  top *or from any step you pick*, so a watcher can send another macro straight
+  to the part that matters; `stop` ends one.
+- **See what a check is looking at** — a **Flash** toggle on a screen-check
+  draws a green outline over the checked area for a second every time it runs,
+  taken just after the screenshot so it is never in the picture the model sees.
 - **Emergency stop** that aborts mid-macro and releases every held key.
 
 ## How it fits together
@@ -62,21 +68,20 @@ extension sends one step at a time, stopping a macro is immediate.
 
 ### Absolute positioning
 
-uinput only speaks *relative* motion. To click at a fixed coordinate the extension
-nudges the pointer, re-reads `global.get_pointer()` and repeats until it is within
-a pixel — up to a dozen passes, each one daemon round trip. It converges whatever
-the acceleration curve is doing, which is why nothing has to touch your mouse
-settings to make it work. With the acceleration profile left on `default` the
-compositor scales each nudge, so the walk takes several passes and you can watch
-it happen; `flat` lands it in one.
+A move to a fixed coordinate is atomic: the extension asks the compositor's own
+seat to warp the pointer there — one call, exact position, no acceleration
+curve involved — and verifies with `global.get_pointer()`. There is no visible
+glide and nothing to configure; mouse settings are never touched.
 
-The walk and the click that follows it hold the daemon between them
-(`DaemonClient.exclusive`), so nothing else plays in the middle of a
-measurement — the pointer being read back has to be the one the last nudge
-moved.
+If a target swallows the warp (a pointer-confining grab), the extension falls
+back to walking there over uinput: nudge, re-read the pointer, nudge again
+until it is within a pixel. The move and the click that follows it hold the
+daemon between them (`DaemonClient.exclusive`), so no other macro plays in the
+middle of a measurement — the pointer being read back has to be the one the
+move placed.
 
-If the target application grabs the pointer — a game with mouse-look — the
-reported position never changes and absolute moves cannot converge. The status
+If the target application grabs the pointer entirely — a game with mouse-look —
+the reported position never changes and absolute moves cannot land. The status
 line says so rather than silently clicking the wrong place. Use `move` steps with
 a relative offset for those.
 
@@ -105,21 +110,31 @@ make
 sudo make install
 ```
 
-`clickmate.service` names the devices to capture. List yours with:
+`clickmate.service` runs the daemon with `-a`: every keyboard and pointer is
+captured automatically, so the installation works on any machine without
+editing anything. A device another process holds exclusively — a key remapper's
+real keyboard, say — is left to it, and the remapper's virtual output is
+captured instead, which keeps recorded keystrokes matching the letters you
+actually press.
+
+To capture only specific devices instead, replace `-a` with `-n` lines:
 
 ```bash
 grep '^N: Name' /proc/bus/input/devices
 ```
 
-and edit the `-n` lines to match. Names rather than paths, because anything
-paired through a wireless receiver gets no entry under `/dev/input/by-id` at all,
-and bare `/dev/input/eventN` numbers move around between boots. `-d PATH` still
-works if you prefer it. A name that matches nothing is only a warning, so an
-unplugged device does not stop the rest from being captured.
+lists the names. Names rather than paths, because anything paired through a
+wireless receiver gets no entry under `/dev/input/by-id` at all, and bare
+`/dev/input/eventN` numbers move around between boots. `-d PATH` still works if
+you prefer it. A name that matches nothing is only a warning, so an unplugged
+device does not stop the rest from being captured. With a remapper in the
+chain, naming devices is the safer choice — the service file shows a worked
+example.
 
-**Capture every device you intend to record from.** A keyboard-with-touchpad and
-a separate mouse are two devices; if the mouse is not listed, the daemon never
-sees it and nothing it does is recorded or observed.
+**Whatever you record from must be captured.** A keyboard-with-touchpad and a
+separate mouse are two devices; with `-a` both are picked up, but if you switch
+to naming devices and leave the mouse out, the daemon never sees it and nothing
+it does is recorded or observed.
 
 Devices do not have to exist when the daemon starts. `/dev/input` is watched, so
 anything matching is captured when it appears and reattached when it comes back
@@ -134,6 +149,16 @@ The daemon takes an exclusive grab on those devices. The kernel drops a grab whe
 the process dies, so a crash self-heals — but while changing the C code, run it
 from an **SSH session or a second TTY** and wrap it in `timeout 60`, so a mistake
 cannot lock you out of your own keyboard.
+
+Shutdown and sleep are both clean. Stopping the daemon (or shutting the machine
+down) releases the grabs, releases anything still held down, and destroys the
+virtual devices. `make install` also drops a hook into
+`/usr/lib/systemd/system-sleep/`, so just before the machine suspends, whatever
+is playing is aborted and every held key released — nothing stays pressed, or
+keeps playing, across a sleep the desktop never sees. The daemon itself stays
+running; devices that re-enumerate on resume are re-captured by its hotplug
+watch. (`SIGUSR1` to the daemon is that same stop-and-release, available from
+anywhere; the sleep hook is just `systemctl kill -s SIGUSR1 clickmate`.)
 
 ### Extension
 
@@ -200,7 +225,7 @@ macro that is switched on — all of them, at the same time. They are independen
 each keeps its own place in its own steps, and one finishing or failing does not
 touch the others. What they share is the machine, so their steps interleave,
 taking turns at the pointer and keyboard one step each. A step is the unit: a
-click at a fixed position holds the pointer for its whole walk *and* the click
+click at a fixed position holds the pointer for the whole move *and* the click
 at the end of it, so no other macro can land a nudge in the middle and leave it
 clicking somewhere else. Two macros both moving the mouse still take it in turns
 and will end up somewhere neither meant; two watching different corners of the
@@ -220,15 +245,18 @@ used to carry a switch each; documents saved with one lose it on first load, and
 those steps run.)
 
 Macros can also drive each other. A `start` step names a macro and starts it; if
-that macro is already going it is stopped first and begins again from the top,
-which is the whole point — a watcher that notices the screen has gone back to its
-starting state can put the macro that works it back at the beginning. A `stop`
-step names one and ends it. Both offer **This macro** as the first choice, so a
-`start` with nothing named is "go round again from the top" and a `stop` with
-nothing named ends the run it is in, the way a `break` ends a loop. Delete a
-macro something points at and the step falls back to meaning this one next time
-the editor draws it; reach it in a run before that and the run stops with an
-error rather than carrying on quietly.
+that macro is already going it is stopped first and begins again, which is the
+whole point — a watcher that notices the screen has gone back to its starting
+state can put the macro that works it back at the beginning. An **At step**
+dropdown on the same step picks where that new run begins: **From the top**, or
+any step of the target macro, shown indented the way the editor nests them. A
+`start` pointing into its own macro is therefore a jump — stop whatever this
+run is doing, continue from the chosen step. A `stop` step names a macro and
+ends it. Both offer **This macro** as the first choice, so a `start` with
+nothing named is "go round again" and a `stop` with nothing named ends the run
+it is in, the way a `break` ends a loop. Delete a macro or a step something
+points at and the reference falls back — the macro to meaning this one, the
+step to the top — rather than pinning the run to something that is gone.
 
 ### Pause, continue, stop
 
@@ -265,7 +293,7 @@ off the menu or close it.
 Build a macro by recording it (`Ctrl+Shift+R`), then open Settings to adjust it.
 Recorded steps go on the row you selected. Click any row in any macro and it is
 tinted to show it: a step, and the recording is dropped in right after it; an
-**Add a step here** row inside a loop, or a **Yes** or **No** header, and the
+**Add step here** row inside a loop, or a **Yes** or **No** header, and the
 recording goes at the end of that
 body. Selecting nothing leaves **The end of the macro**, which is where a
 recording goes by default. Choose the body of a loop and a recording lands inside
@@ -288,15 +316,18 @@ what you hoped — and putting it first means it is not buried under a `then` th
 has grown. It changes nothing about the run: the condition is still asked once
 and the matching branch still runs.
 
-Steps are added from the **Add a step…** dropdown, which is also the button:
+Steps are added from the **Add step…** dropdown, which is also the button:
 picking a kind adds it there, at the end of whichever list the dropdown sits in.
 The row it sits on is the last row of that list, under the steps, because that is
 where what it adds appears.
-Next to it, **Record one** captures a single action, which is the quickest way
-to fill in coordinates: the window gets out of the way, and the next click you
-make becomes a `click` step at that position. If you move the pointer and hold
-still for about a second instead, you get a `move` step. `Ctrl+Shift+M` does the
-same thing without opening Settings, into whichever row is selected.
+Next to it, **Record…** offers two ways in. **One step** captures a single
+action, which is the quickest way to fill in coordinates: the window gets out
+of the way, and the next click you make becomes a `click` step at that
+position; move the pointer and hold still for about a second instead and you
+get a `move` step. **Multiple steps** starts a whole recording landing at that
+same row — the window stays out of the way until you stop (`Ctrl+Shift+R`, the
+panel menu, or picking **Multiple steps** again). `Ctrl+Shift+M` captures one
+step without opening Settings, into whichever row is selected.
 
 The **▶** on a step does that one step immediately, on the real screen: the
 window drops out of the way, the step runs, and the window comes back. It is the
@@ -322,22 +353,36 @@ area — each with a **Show** button that flashes a red X (or an outline) at tha
 spot on the real screen for a couple of seconds, so you can check a number
 without running anything. Next to it, **Pick** fills the field by pointing: the
 window gets out of the way, you click where you mean, and the position lands in
-the field — the same gesture as **Record one**, without adding a step, which is
+the field — the same gesture as recording one step, without adding one, which is
 how you correct a coordinate that has moved. On an area it moves the corner and
 leaves the size alone. A pick that catches nothing before it times out says so
 and leaves the field as it was. A step's title follows its coordinates, so a
 click that now goes somewhere else says where.
 
-Where a click or a move goes is one row: the numbers, **Pick**, **Show**, and a
-button for not using coordinates at all. On a click that button means "wherever
-the pointer already is", and the numbers go away with it; on a move it means "by
-this much" rather than "to here", and the numbers stay but stop being a place —
-so **Pick** and **Show**, which are about a spot on the screen, go instead. It
-used to be a dropdown naming the mode with the coordinates on a second row
-underneath: a line of prose and a line of numbers to say one thing.
+Where a click or a move goes is one row: the numbers, **Pick**, **Show**, and
+buttons for not using coordinates at all. On a click the mouse button means
+"wherever the pointer already is", and the numbers go away with it; on a move
+it means "by this much" rather than "to here", and the numbers stay but stop
+being a place — so **Pick** and **Show**, which are about a spot on the screen,
+go instead. It used to be a dropdown naming the mode with the coordinates on a
+second row underneath: a line of prose and a line of numbers to say one thing.
 
-Screen areas for `llm` conditions can also be chosen with **Pick area…**, which
-drops the window out of the way and lets you drag a rectangle over the screen.
+The history button on the same row is "@ previous": the step goes back to
+wherever the pointer was before the last positioned step in the run. Every
+positioned click and move remembers the spot it left, so *click at 3438,549*
+followed by *click left @ previous* is an excursion and its undo — the macro
+reaches over, clicks, and puts the pointer back where you were working, in a
+blink, since positioned moves are instant warps. A "@ previous" before any
+positioned step has nowhere to go and stays put; each run starts with no
+history.
+
+Screen areas for `llm` conditions can also be chosen with **Pick**, which drops
+the window out of the way and lets you drag a rectangle over the screen;
+**Screen** goes back to checking the whole screen. The **Flash** toggle on the
+same row draws a green outline over the checked area for a second every time
+the check runs, so you can watch a running macro look where you meant it to.
+The flash fires just after the screenshot is taken, so it is never in the
+picture the model is asked about.
 
 At the top of the Macros page, **Backup** has an **Export** and an **Import**,
 each offering **Macros** or **Settings** — two files, because they move for
@@ -350,7 +395,14 @@ take, and says which keys it ignored.
 
 ### Daemon HTTP API
 
-Over the unix socket at `/var/run/click-socket`:
+Over the unix socket at `/var/run/click-socket`. One thing to know before
+driving it directly: the daemon speaks raw evdev, and its virtual mouse is a
+**relative** device — pointer motion through `/play` is `REL_X`/`REL_Y`, with
+the compositor's acceleration curve applied to whatever you send. Absolute
+positioning ("click at x,y", "@ previous") is the extension's work: it warps
+the compositor's pointer, verifies where it landed, and only then clicks
+through the daemon. The raw API has no such convergence — a delta in means an
+accelerated delta out.
 
 ```bash
 curl --unix-socket /var/run/click-socket http://localhost/status
@@ -376,8 +428,10 @@ tools/watch-events         # until Ctrl-C
 tools/watch-events 15 --raw
 ```
 
-If a device does not appear here, nothing above the daemon can see it either —
-add it to `clickmate.service` with `-n "<its name>"`.
+If a device does not appear here, nothing above the daemon can see it either.
+With `-a` that means it did not look like a keyboard or pointer, or something
+else holds it exclusively — name it in `clickmate.service` with `-n "<its
+name>"` to insist.
 
 Or by hand (`socat` works too, if you have it):
 
@@ -439,7 +493,7 @@ systemctl mask systemd-udev-settle.service
   `sudo make install`.
 - **Clicks land in the wrong place** — check whether the target grabs the
   pointer (see *Absolute positioning*); the status line reports a move that
-  could not converge.
+  could not land.
 - **Daemon will not start** — check permissions on `/dev/uinput` and that
   `libjson-c` and `libmicrohttpd` are installed.
 

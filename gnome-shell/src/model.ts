@@ -95,8 +95,12 @@ interface StepCommon {
 export type ClickStep = StepCommon & {
     kind: 'click';
     button: MouseButton;
-    /** 'abs' moves to x/y first, 'current' clicks wherever the pointer is. */
-    mode: 'abs' | 'current';
+    /**
+     * 'abs' moves to x/y first, 'current' clicks wherever the pointer is, and
+     * 'prev' moves back to where the pointer was before the last positioned
+     * step — the excursion undone before clicking.
+     */
+    mode: 'abs' | 'current' | 'prev';
     x?: number;
     y?: number;
     holdMs?: number;
@@ -104,7 +108,8 @@ export type ClickStep = StepCommon & {
 
 export type MoveStep = StepCommon & {
     kind: 'move';
-    mode: 'abs' | 'rel';
+    /** 'prev' is the same return move a 'prev' click makes, without the click. */
+    mode: 'abs' | 'rel' | 'prev';
     x?: number;
     y?: number;
     dx?: number;
@@ -560,9 +565,16 @@ export function cloneStep(step: Step): Step {
 export function lastPointerEndpoint(steps: Step[]): { x: number; y: number } | null {
     let endpoint: { x: number; y: number } | null = null;
     walk(steps, ({ step }) => {
-        if ((step.kind === 'click' || step.kind === 'move') && step.mode === 'abs'
-            && typeof step.x === 'number' && typeof step.y === 'number') {
+        if (step.kind !== 'click' && step.kind !== 'move') {
+            return;
+        }
+        if (step.mode === 'abs' && typeof step.x === 'number' && typeof step.y === 'number') {
             endpoint = { x: step.x, y: step.y };
+        } else if (step.mode === 'prev') {
+            // "@ previous" moves somewhere no document can name — away from
+            // the last absolute target by definition — so past it there is no
+            // endpoint to claim until another absolute step sets one.
+            endpoint = null;
         }
     });
     return endpoint;
@@ -980,12 +992,12 @@ export function describeStep(
 ): string {
     switch (step.kind) {
         case 'click':
-            return step.mode === 'abs'
-                ? `Click ${step.button} @ ${step.x ?? 0},${step.y ?? 0}`
+            return step.mode === 'abs' ? `Click ${step.button} @ ${step.x ?? 0},${step.y ?? 0}`
+                : step.mode === 'prev' ? `Click ${step.button} @ previous`
                 : `Click ${step.button} at pointer`;
         case 'move':
-            return step.mode === 'abs'
-                ? `Move to ${step.x ?? 0},${step.y ?? 0}`
+            return step.mode === 'abs' ? `Move to ${step.x ?? 0},${step.y ?? 0}`
+                : step.mode === 'prev' ? 'Move to previous'
                 : `Move by ${step.dx ?? 0},${step.dy ?? 0}`;
         case 'scroll':
             return `Scroll ${step.dx ? `${step.dx} horizontally` : ''}${step.dx && step.dy ? ', ' : ''}${step.dy ? `${step.dy} vertically` : ''}`.trim() || 'Scroll';

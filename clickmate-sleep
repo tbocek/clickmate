@@ -1,0 +1,9 @@
+#!/bin/sh
+# Installed by clickmate (make install) into /usr/lib/systemd/system-sleep/.
+# systemd runs everything there with "pre" before the system sleeps: stop any
+# playing macro and release every held key, so nothing stays pressed — or
+# keeps playing — across a suspend the desktop never sees. SIGUSR1 is the
+# daemon's /stop as a signal; the daemon itself keeps running, and devices
+# that re-enumerate on resume are picked up by its own hotplug watch.
+[ "$1" = pre ] && systemctl kill -s SIGUSR1 clickmate.service 2>/dev/null
+exit 0

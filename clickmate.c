@@ -28,6 +28,7 @@
 #include <dirent.h>
 #include <strings.h>
 #include <limits.h>
+#include <limits.h>
 #include <sys/inotify.h>
 #include <poll.h>
 
@@ -71,6 +72,8 @@ struct device_spec {
 };
 static struct device_spec specs[MAX_DEVICES * 2];
 static int spec_count = 0;
+// -a: capture every keyboard and pointer instead of only what specs name.
+static bool auto_capture = false;
 
 static volatile sig_atomic_t keep_running = 1;
 static struct MHD_Daemon *http_daemon = NULL;
@@ -223,6 +226,19 @@ static bool has_bit(const unsigned int array[], int bit) {
     return (array[bit / 32] & (1U << (bit % 32))) != 0;
 }
 
+// What a device is, judged by what it can say: something that types, something
+// that points, or neither — power buttons, lid switches and gamepads are 0.
+static int classify(const unsigned int key_bits[], const unsigned int rel_bits[]) {
+    int cls = 0;
+    if (has_bit(key_bits, KEY_A) || has_bit(key_bits, KEY_ESC) || has_bit(key_bits, KEY_SPACE)) {
+        cls |= CLASS_KEYBOARD;
+    }
+    if (has_bit(key_bits, BTN_LEFT) || has_bit(rel_bits, REL_X)) {
+        cls |= CLASS_POINTER;
+    }
+    return cls;
+}
+
 static bool setup_event_type(int fdi, int fdo, unsigned long event_type, int max_val, const unsigned int array_bit[]) {
     struct uinput_abs_setup abs_setup = {};
     bool abs_init_once = false;
@@ -315,14 +331,7 @@ static bool mirror_capabilities(struct captured_device *d, int *cls_out) {
     }
 
     // Classify: what can we sensibly inject into this device?
-    int cls = 0;
-    if (has_bit(array_bit_key, KEY_A) || has_bit(array_bit_key, KEY_ESC) || has_bit(array_bit_key, KEY_SPACE)) {
-        cls |= CLASS_KEYBOARD;
-    }
-    if (has_bit(array_bit_key, BTN_LEFT) || has_bit(array_bit_rel, REL_X)) {
-        cls |= CLASS_POINTER;
-    }
-    *cls_out = cls;
+    *cls_out = classify(array_bit_key, array_bit_rel);
 
     if (!setup_event_type(d->fdi, d->fdo, UI_SET_EVBIT, EV_SW, array_bit_ev) ||
         !setup_event_type(d->fdi, d->fdo, UI_SET_KEYBIT, KEY_MAX, array_bit_key) ||
@@ -821,6 +830,19 @@ static void sig_handler(int sig) {
     }
 }
 
+// SIGUSR1 is /stop as a signal: abort whatever is playing and release every
+// held key, but keep running. The systemd sleep hook sends it before suspend,
+// so nothing stays pressed — or keeps playing — across a sleep the desktop
+// never sees. Only flags are set here: releasing the keys takes a mutex, which
+// is not async-signal-safe, so the main loop does that part.
+static volatile sig_atomic_t soft_stop = 0;
+
+static void soft_stop_handler(int sig) {
+    (void)sig;
+    soft_stop = 1;
+    play_abort = 1;
+}
+
 static int create_unix_listener(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd == -1) {
@@ -855,7 +877,11 @@ static void usage(const char *path) {
     const char *basename = strrchr(path, '/');
     basename = basename ? basename + 1 : path;
 
-    fprintf(stderr, "usage: %s [-d PATH] [-n NAME] …\n", basename);
+    fprintf(stderr, "usage: %s [-a] [-d PATH] [-n NAME] …\n", basename);
+    fprintf(stderr, "  -a     \tCapture every keyboard and pointer, present or plugged in later.\n");
+    fprintf(stderr, "         \tDevices another process holds exclusively — a key remapper's\n");
+    fprintf(stderr, "         \treal keyboard — are left to it; its virtual output is taken\n");
+    fprintf(stderr, "         \tinstead. With a remapper in the chain, prefer naming devices.\n");
     fprintf(stderr, "  -d PATH\tCapture the device at this path.\n");
     fprintf(stderr, "  -n NAME\tCapture every device with this exact name (case-insensitive).\n");
     fprintf(stderr, "         \tUse this for receiver-paired devices, which have no stable\n");
@@ -992,6 +1018,8 @@ static bool attach_device(const char *path, const char *wanted) {
 struct scan_entry {
     char path[288];
     char name[256];
+    int cls;            // what it is; 0 for the devices auto mode leaves alone
+    bool grabbable;     // false while someone else holds it exclusively
 };
 
 static int compare_scan(const void *a, const void *b) {
@@ -1036,19 +1064,62 @@ static void rescan(bool verbose) {
         }
         e->name[0] = '\0';
         bool named = ioctl(fd, EVIOCGNAME(sizeof(e->name) - 1), e->name) >= 0;
-        close(fd);
 
-        // Never look at our own clones: capturing one would feed every event
-        // straight back into itself.
-        if (named && strncmp(e->name, "Clickmate", 9) != 0) {
-            found_count++;
+        // Never look at our own clones — capturing one would feed every event
+        // straight back into itself — and decided before the probe below, so
+        // not even a momentary test-grab ever lands on a clone mid-playback.
+        if (!named || strncmp(e->name, "Clickmate", 9) == 0) {
+            close(fd);
+            continue;
         }
+
+        // Only auto mode wants to know what a node is and whether anyone else
+        // holds it; under plain -n/-d the nodes are left entirely untouched.
+        e->cls = 0;
+        e->grabbable = false;
+        if (auto_capture) {
+            unsigned int ev[EV_MAX / 32 + 1] = {0}, key[KEY_MAX / 32 + 1] = {0}, rel[REL_MAX / 32 + 1] = {0};
+            if (ioctl(fd, EVIOCGBIT(0, sizeof(ev)), &ev) >= 0) {
+                if (has_bit(ev, EV_KEY)) {
+                    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(key)), &key);
+                }
+                if (has_bit(ev, EV_REL)) {
+                    ioctl(fd, EVIOCGBIT(EV_REL, sizeof(rel)), &rel);
+                }
+            }
+            e->cls = classify(key, rel);
+            // A grab that fails belongs to a remapper; released straight away,
+            // it was only a question — and only asked of keyboards and pointers.
+            e->grabbable = e->cls != 0 && ioctl(fd, EVIOCGRAB, 1) >= 0;
+            if (e->grabbable) {
+                ioctl(fd, EVIOCGRAB, 0);
+            }
+        }
+        close(fd);
+        found_count++;
     }
     closedir(dir);
 
     // readdir order is arbitrary; sort so that two devices sharing a name — the
     // two halves of a keyboard, say — always land in the same slots.
     qsort(found, found_count, sizeof(found[0]), compare_scan);
+
+    // Auto mode: every keyboard and pointer that nobody else holds. A device
+    // that cannot be grabbed sits behind a remapper, whose virtual output is in
+    // this same list and gets captured instead — taking the raw device too
+    // would record every keystroke twice, once in each spelling. Slots are
+    // keyed by name, the same as -n, so a device whose event number moved
+    // between boots still finds its old slot. attach_device skips paths that
+    // are already captured, so -a composes with explicit -n/-d entries.
+    if (auto_capture) {
+        pthread_mutex_lock(&devices_mutex);
+        for (int i = 0; i < found_count; i++) {
+            if (found[i].cls != 0 && found[i].grabbable) {
+                attach_device(found[i].path, found[i].name);
+            }
+        }
+        pthread_mutex_unlock(&devices_mutex);
+    }
 
     for (int s = 0; s < spec_count; s++) {
         int matched = 0;
@@ -1064,8 +1135,13 @@ static void rescan(bool verbose) {
             }
         }
         // A -d path is often a by-id symlink, which the scan above never sees.
+        // Resolved before attaching, so the slot's path is the same eventN
+        // spelling the scan uses and one device is never captured twice under
+        // two names — which is what lets -d compose with -a and with itself.
         if (!specs[s].by_name && matched == 0 && access(specs[s].value, R_OK) == 0) {
-            matched += attach_device(specs[s].value, specs[s].value) ? 1 : 0;
+            char resolved[PATH_MAX];
+            const char *path = realpath(specs[s].value, resolved) ? resolved : specs[s].value;
+            matched += attach_device(path, specs[s].value) ? 1 : 0;
         }
         pthread_mutex_unlock(&devices_mutex);
 
@@ -1168,13 +1244,18 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, sig_handler);
     signal(SIGINT, sig_handler);
+    signal(SIGHUP, sig_handler);
     signal(SIGSEGV, sig_handler);
     signal(SIGABRT, sig_handler);
+    signal(SIGUSR1, soft_stop_handler);
 
     int opt;
 
-    while ((opt = getopt(argc, argv, "d:n:h")) != -1) {
+    while ((opt = getopt(argc, argv, "ad:n:h")) != -1) {
         switch (opt) {
+            case 'a':
+                auto_capture = true;
+                break;
             case 'd':
             case 'n':
                 if (spec_count >= (int)(sizeof(specs) / sizeof(specs[0]))) {
@@ -1194,9 +1275,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (spec_count == 0) {
+    if (spec_count == 0 && !auto_capture) {
         usage(argv[0]);
-        fprintf(stderr, "Error: no input device specified.\n");
+        fprintf(stderr, "Error: no input device specified. Use -a to capture every keyboard and pointer.\n");
         return EXIT_FAILURE;
     }
 
@@ -1257,8 +1338,17 @@ int main(int argc, char *argv[]) {
 
     printf("[DEBUG] Listening on %s and %s\n", SOCKET_PATH, EVENT_SOCKET_PATH);
 
+    // Polled rather than pause()d: a process-directed signal may be delivered
+    // to whichever thread has it unblocked, and a pause() that another thread's
+    // handler answered would sleep on. A 200 ms check costs nothing and puts a
+    // bound on how long a stop request can sit unhandled.
     while (keep_running) {
-        pause();
+        usleep(200000);
+        if (soft_stop) {
+            soft_stop = 0;
+            release_all_held();
+            fprintf(stderr, "clickmate: playback stopped, held keys released\n");
+        }
     }
 
     printf("[DEBUG] Shutting down\n");

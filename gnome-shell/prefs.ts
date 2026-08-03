@@ -13,10 +13,12 @@ import {
     CONDITION_TYPE_LABELS,
     AUTHORABLE_STEP_KINDS as STEP_KINDS,
     STEP_KIND_LABELS,
+    type ClickStep,
     type Condition,
     type ConditionType,
     type LlmCondition,
     type Macro,
+    type MoveStep,
     type Region,
     type Step,
     type StepKind,
@@ -294,6 +296,17 @@ function iconButton(iconName: string, tooltip: string, onClick: () => void): Gtk
     return button;
 }
 
+/** The toggle sibling of `iconButton`: same flat row-suffix styling. */
+function toggleButton(iconName: string, tooltip: string, active: boolean): Gtk.ToggleButton {
+    return new Gtk.ToggleButton({
+        icon_name: iconName,
+        tooltip_text: tooltip,
+        active,
+        valign: Gtk.Align.CENTER,
+        css_classes: ['flat'],
+    });
+}
+
 /** As tall as a popover is allowed to get before its text starts scrolling. */
 const POPOVER_MAX_H = 420;
 
@@ -521,28 +534,36 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
     /**
-     * Where a click or a move goes, in one row: the numbers, and a button that
-     * says whether they are used at all. Both used to be two rows — a dropdown
+     * Where a click or a move goes, in one row: the numbers, and buttons that
+     * say whether they are used at all. It used to be two rows — a dropdown
      * naming a mode, and under it the coordinates the mode was about — which is
      * a line of prose and a line of numbers to say one thing.
      *
-     * `on` is the toggled state: for a click it has no numbers (the pointer is
-     * already wherever it is), for a move it has the offset instead of a
-     * position. **Pick** and **Show** belong to a place on the screen, so they
-     * are there only when the numbers are one.
+     * Three states, one row. Coordinates are a place on the screen, with
+     * **Pick** and **Show** beside them. `onModeName` is the step's own
+     * alternative — 'current' for a click, 'rel' for a move — described by
+     * `on`. And either step can aim at 'prev', back to where the pointer was
+     * before the last positioned step; that state reads the same on both, so
+     * everything about it lives here rather than with the callers.
      */
     private _positionRow(opts: {
-        step: Step;
+        step: ClickStep | MoveStep;
         toggleIcon: string;
         toggleTip: string;
-        toggleOn: boolean;
-        onToggle: (on: boolean) => void;
+        onModeName: 'current' | 'rel';
         off: { title: string; values: () => number[] };
         on: { title: string; subtitle?: string; values?: () => number[] };
         apply: (values: number[]) => void;
     }): Adw.ActionRow {
+        type RowState = { title: string; subtitle?: string; values?: () => number[] };
+        const prevState: RowState = {
+            title: _('Position'),
+            subtitle: _('Where the pointer was before the last positioned step'),
+        };
         const row = new Adw.ActionRow();
-        const state = () => (toggle.get_active() ? opts.on : opts.off);
+        let mode: 'off' | 'on' | 'prev' =
+            opts.step.mode === 'prev' ? 'prev' : opts.step.mode === opts.onModeName ? 'on' : 'off';
+        const state = (): RowState => (mode === 'prev' ? prevState : mode === 'on' ? opts.on : opts.off);
 
         const entry = this._numbersEntry(opts.off.values(), values => {
             opts.apply(values);
@@ -560,36 +581,53 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             _('Flash this position on the screen for a couple of seconds'),
             () => this._showMarker(...point()));
 
-        const toggle = new Gtk.ToggleButton({
-            icon_name: opts.toggleIcon,
-            tooltip_text: opts.toggleTip,
-            active: opts.toggleOn,
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-        });
+        const toggle = toggleButton(opts.toggleIcon, opts.toggleTip, mode === 'on');
+        const history = toggleButton('document-open-recent-symbolic',
+            _('Go back to where the pointer was before the last positioned step'), mode === 'prev');
 
         const sync = () => {
             const now = state();
             const numbers = now.values;
             row.set_title(now.title);
-            row.set_subtitle(('subtitle' in now && now.subtitle) || '');
+            row.set_subtitle(now.subtitle ?? '');
             entry.set_visible(Boolean(numbers));
-            // Untoggled is the state that means a place on the screen, in both
+            // 'off' is the state that means a place on the screen, in both
             // rows: a click's coordinates, a move's destination.
-            const placed = !toggle.get_active();
-            pick.set_visible(placed);
-            show.set_visible(placed);
+            pick.set_visible(mode === 'off');
+            show.set_visible(mode === 'off');
             if (numbers) {
                 entry.set_text(numbers().join(', '));
             }
         };
-        toggle.connect('toggled', () => {
-            opts.onToggle(toggle.get_active());
-            // In place rather than rebuilt: a rebuild would take the button you
-            // just pressed down with it.
+        // The mode variable drives the buttons, not the other way round: a
+        // press proposes a mode, setMode settles both buttons to it, and the
+        // guard keeps those programmatic settles from proposing again. Synced
+        // in place rather than rebuilt: a rebuild would take the button you
+        // just pressed down with it.
+        let settling = false;
+        const setMode = (next: 'off' | 'on' | 'prev') => {
+            mode = next;
+            settling = true;
+            toggle.set_active(mode === 'on');
+            history.set_active(mode === 'prev');
+            settling = false;
+            // The one place the row's vocabulary meets the step's. Cast because
+            // a union field only accepts writes both members allow.
+            (opts.step as { mode: string }).mode =
+                mode === 'on' ? opts.onModeName : mode === 'prev' ? 'prev' : 'abs';
             sync();
             this._refreshStepTitle(opts.step);
             this._save();
+        };
+        toggle.connect('toggled', () => {
+            if (!settling) {
+                setMode(toggle.get_active() ? 'on' : 'off');
+            }
+        });
+        history.connect('toggled', () => {
+            if (!settling) {
+                setMode(history.get_active() ? 'prev' : 'off');
+            }
         });
         sync();
 
@@ -597,6 +635,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         row.add_suffix(pick);
         row.add_suffix(show);
         row.add_suffix(toggle);
+        row.add_suffix(history);
         return row;
     }
 
@@ -1297,15 +1336,10 @@ export default class ClickmatePreferences extends ExtensionPreferences {
         // A repeat has exactly one setting, so it lives on the row rather than
         // behind a fold: the count, and a toggle for having no count at all.
         if (step.kind === 'loop') {
-            const forever = new Gtk.ToggleButton({
-                // Not the loop's own kind icon, which already sits on this row:
-                // repeat-song is the "keep going" variant of the same family.
-                icon_name: 'media-playlist-repeat-song-symbolic',
-                tooltip_text: _('Repeat without a limit'),
-                active: step.count === 'forever',
-                valign: Gtk.Align.CENTER,
-                css_classes: ['flat'],
-            });
+            // Not the loop's own kind icon, which already sits on this row:
+            // repeat-song is the "keep going" variant of the same family.
+            const forever = toggleButton('media-playlist-repeat-song-symbolic',
+                _('Repeat without a limit'), step.count === 'forever');
             const count = new Gtk.SpinButton({
                 adjustment: new Gtk.Adjustment({
                     lower: 1, upper: 1000000, step_increment: 1, page_increment: 10,
@@ -1452,14 +1486,11 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     }));
                 rows.push(this._positionRow({
                     step,
-                    // The toggle is the whole of the old Position dropdown: on
-                    // means there are no coordinates to have.
+                    // The toggles are the whole of the old Position dropdown: one
+                    // down means there are no coordinates to have.
                     toggleIcon: 'input-mouse-symbolic',
                     toggleTip: _('Click wherever the pointer already is'),
-                    toggleOn: step.mode === 'current',
-                    onToggle: on => {
-                        step.mode = on ? 'current' : 'abs';
-                    },
+                    onModeName: 'current',
                     off: { title: _('Position'), values: () => [step.x ?? 0, step.y ?? 0] },
                     on: { title: _('Position'), subtitle: _('Wherever the pointer already is') },
                     apply: ([x, y]) => {
@@ -1478,10 +1509,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                     step,
                     toggleIcon: 'go-jump-symbolic',
                     toggleTip: _('Move by an offset instead of to a position'),
-                    toggleOn: step.mode === 'rel',
-                    onToggle: on => {
-                        step.mode = on ? 'rel' : 'abs';
-                    },
+                    onModeName: 'rel',
                     off: { title: _('Position'), values: () => [step.x ?? 0, step.y ?? 0] },
                     // An offset is numbers too — they just are not a place, so
                     // there is nothing to point at or flash on the screen.

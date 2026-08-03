@@ -22,6 +22,7 @@ clean:
 install:
 	cp clickmate /usr/local/bin/
 	cp clickmate.service /etc/systemd/system/
+	install -m 755 clickmate-sleep /usr/lib/systemd/system-sleep/clickmate
 	systemctl restart systemd-udevd.service
 	systemctl daemon-reload
 	systemctl enable clickmate
@@ -32,5 +33,6 @@ uninstall:
 	systemctl disable clickmate
 	rm /usr/local/bin/clickmate
 	rm /etc/systemd/system/clickmate.service
+	rm -f /usr/lib/systemd/system-sleep/clickmate
 	systemctl restart systemd-udevd.service
 	systemctl daemon-reload
