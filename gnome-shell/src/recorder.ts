@@ -135,7 +135,7 @@ export class Recorder {
         void this._daemon.setRecording(false).catch(error => {
             reportProblem('Recording', `could not take the daemon out of recording mode: ${(error as Error).message}`, {
                 hint: 'It may still be mirroring your input to the event stream. ' +
-                    'Restart it with: sudo systemctl restart clickmate',
+                    'Restart it with: sudo systemctl restart macroclickwerk',
             });
         });
     }

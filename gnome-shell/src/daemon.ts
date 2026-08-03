@@ -1,4 +1,4 @@
-// Async client for the clickmate daemon. Everything here runs on the compositor
+// Async client for the macroclickwerk daemon. Everything here runs on the compositor
 // thread, so every call is asynchronous: a synchronous socket read would freeze
 // the whole desktop for as long as the daemon takes to answer.
 
@@ -8,8 +8,8 @@ import GLib from 'gi://GLib';
 import type { RawEvent } from './model.js';
 import { reportProblem } from './problems.js';
 
-export const DEFAULT_CONTROL_SOCKET = '/var/run/click-socket';
-export const DEFAULT_EVENT_SOCKET = '/var/run/clickmate-events';
+export const DEFAULT_CONTROL_SOCKET = '/var/run/macroclickwerk-socket';
+export const DEFAULT_EVENT_SOCKET = '/var/run/macroclickwerk-events';
 
 let promisified = false;
 

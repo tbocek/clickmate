@@ -5,7 +5,7 @@ set -Eeuo pipefail
 trap 'cleanup $?' SIGINT SIGTERM ERR EXIT
 
 # Configuration
-EXTENSION_UUID="clickmate@tbocek.github.com"
+EXTENSION_UUID="macroclickwerk@tbocek.github.com"
 EXTENSION_DIR="$(pwd)/dist/"
 LOCAL_EXTENSIONS_DIR="$HOME/.local/share/gnome-shell/extensions"
 

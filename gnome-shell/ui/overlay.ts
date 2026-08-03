@@ -72,12 +72,12 @@ function presentMarker(actors: St.Widget[], durationMs: number): void {
  */
 export function showMarker(x: number, y: number, w?: number, h?: number, durationMs = MARKER_DURATION_MS): void {
     const isRegion = typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0;
-    const container = new St.Widget({ style_class: 'clickmate-marker', reactive: false });
+    const container = new St.Widget({ style_class: 'macroclickwerk-marker', reactive: false });
 
     if (isRegion) {
         container.set_position(Math.round(x), Math.round(y));
         container.set_size(Math.round(w!), Math.round(h!));
-        container.add_style_class_name('clickmate-marker-region');
+        container.add_style_class_name('macroclickwerk-marker-region');
     } else {
         const size = 44;
         container.set_size(size, size);
@@ -85,7 +85,7 @@ export function showMarker(x: number, y: number, w?: number, h?: number, duratio
 
         // Two bars rotated into an X, pivoted on their own centre.
         for (const angle of [45, -45]) {
-            const bar = new St.Widget({ style_class: 'clickmate-marker-bar' });
+            const bar = new St.Widget({ style_class: 'macroclickwerk-marker-bar' });
             bar.set_size(size, 3);
             bar.set_position(0, size / 2 - 1);
             bar.set_pivot_point(0.5, 0.5);
@@ -95,7 +95,7 @@ export function showMarker(x: number, y: number, w?: number, h?: number, duratio
     }
 
     const label = new St.Label({
-        style_class: 'clickmate-marker-label',
+        style_class: 'macroclickwerk-marker-label',
         text: isRegion ? `${x},${y} ${w}\u00d7${h}` : `${x}, ${y}`,
     });
     // Below the marker, unless that would run off the bottom of the screen.
@@ -116,7 +116,7 @@ const FLASH_DURATION_MS = 1000;
  */
 export function flashRegion(region?: Region | null): void {
     const { x, y, w, h } = region ?? { x: 0, y: 0, w: global.stage.width, h: global.stage.height };
-    const box = new St.Widget({ style_class: 'clickmate-marker-flash', reactive: false });
+    const box = new St.Widget({ style_class: 'macroclickwerk-marker-flash', reactive: false });
     box.set_position(Math.round(x), Math.round(y));
     box.set_size(Math.round(w), Math.round(h));
     presentMarker([box], FLASH_DURATION_MS);
@@ -129,7 +129,7 @@ export function flashRegion(region?: Region | null): void {
 export function pickRegion(): Promise<Region | null> {
     return new Promise(resolve => {
         const overlay = new St.Widget({
-            style_class: 'clickmate-picker',
+            style_class: 'macroclickwerk-picker',
             reactive: true,
             can_focus: true,
             x: 0,
@@ -138,11 +138,11 @@ export function pickRegion(): Promise<Region | null> {
             height: global.stage.height,
         });
 
-        const band = new St.Widget({ style_class: 'clickmate-picker-band', visible: false });
+        const band = new St.Widget({ style_class: 'macroclickwerk-picker-band', visible: false });
         overlay.add_child(band);
 
         const hint = new St.Label({
-            style_class: 'clickmate-picker-hint',
+            style_class: 'macroclickwerk-picker-hint',
             text: 'Drag to select the area the model should look at — Escape to cancel',
         });
         overlay.add_child(hint);

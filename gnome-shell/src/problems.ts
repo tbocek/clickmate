@@ -12,7 +12,7 @@
 
 import GLib from 'gi://GLib';
 
-/** Which part of clickmate failed. Shown verbatim in the popup. */
+/** Which part of macroclickwerk failed. Shown verbatim in the popup. */
 export type ProblemSource =
     | 'Model'
     | 'Daemon'
@@ -56,7 +56,7 @@ function notify(): void {
         try {
             listener();
         } catch (error) {
-            logError(error as Error, 'clickmate: problem listener failed');
+            logError(error as Error, 'macroclickwerk: problem listener failed');
         }
     }
 }
@@ -71,9 +71,9 @@ export function reportProblem(source: ProblemSource, message: string, options: P
     const time = GLib.DateTime.new_now_local().format('%H:%M:%S') ?? '';
 
     if (options.error) {
-        logError(options.error, `clickmate: ${source}: ${text}`);
+        logError(options.error, `macroclickwerk: ${source}: ${text}`);
     } else {
-        log(`clickmate: ${source}: ${text}`);
+        log(`macroclickwerk: ${source}: ${text}`);
     }
 
     const existing = problems.find(problem => problem.source === source && problem.message === text);

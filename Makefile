@@ -1,7 +1,7 @@
 #pkg-config from: https://www.geany.org/manual/gtk/glib/glib-compiling.html
 #https://github.com/joprietoe/gdbus/blob/master/Makefile
 #https://stackoverflow.com/questions/51269129/minimal-gdbus-client
-TARGET = clickmate
+TARGET = macroclickwerk
 CC = gcc
 CFLAGS = -Wall -O3 -lpthread -ljson-c -lmicrohttpd
 
@@ -9,8 +9,8 @@ CFLAGS = -Wall -O3 -lpthread -ljson-c -lmicrohttpd
 
 default: all
 
-all: clickmate.c
-	$(CC) $(CFLAGS) -o $(TARGET) clickmate.c
+all: macroclickwerk.c
+	$(CC) $(CFLAGS) -o $(TARGET) macroclickwerk.c
 
 watch:
 	./tools/watch-events 15
@@ -20,19 +20,19 @@ clean:
 	-rm -f $(TARGET)
 
 install:
-	cp clickmate /usr/local/bin/
-	cp clickmate.service /etc/systemd/system/
-	install -m 755 clickmate-sleep /usr/lib/systemd/system-sleep/clickmate
+	cp macroclickwerk /usr/local/bin/
+	cp macroclickwerk.service /etc/systemd/system/
+	install -m 755 macroclickwerk-sleep /usr/lib/systemd/system-sleep/macroclickwerk
 	systemctl restart systemd-udevd.service
 	systemctl daemon-reload
-	systemctl enable clickmate
-	systemctl start clickmate
+	systemctl enable macroclickwerk
+	systemctl start macroclickwerk
 
 uninstall:
-	systemctl stop clickmate
-	systemctl disable clickmate
-	rm /usr/local/bin/clickmate
-	rm /etc/systemd/system/clickmate.service
-	rm -f /usr/lib/systemd/system-sleep/clickmate
+	systemctl stop macroclickwerk
+	systemctl disable macroclickwerk
+	rm /usr/local/bin/macroclickwerk
+	rm /etc/systemd/system/macroclickwerk.service
+	rm -f /usr/lib/systemd/system-sleep/macroclickwerk
 	systemctl restart systemd-udevd.service
 	systemctl daemon-reload

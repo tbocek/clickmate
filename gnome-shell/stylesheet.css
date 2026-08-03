@@ -1,31 +1,31 @@
-/* Clickmate: panel popup, run HUD and region picker. */
+/* Macroclickwerk: panel popup, run HUD and region picker. */
 
-.clickmate-status-box {
+.macroclickwerk-status-box {
     spacing: 2px;
 }
 
-.clickmate-status {
+.macroclickwerk-status {
     font-weight: bold;
 }
 
-.clickmate-detail {
+.macroclickwerk-detail {
     font-size: 0.85em;
     color: rgba(255, 255, 255, 0.65);
     max-width: 30em;
 }
 
-.clickmate-recording {
+.macroclickwerk-recording {
     color: #e01b24;
 }
 
 /* Panel icon while unread problems are waiting in the popup. */
-.clickmate-problem-icon {
+.macroclickwerk-problem-icon {
     color: #f5c211;
 }
 
 /* Problems area */
 
-.clickmate-problems-heading {
+.macroclickwerk-problems-heading {
     spacing: 6px;
     padding-bottom: 4px;
     margin-top: 4px;
@@ -33,29 +33,29 @@
     padding-top: 8px;
 }
 
-.clickmate-problems-icon {
+.macroclickwerk-problems-icon {
     color: #f5c211;
 }
 
-.clickmate-problems-title {
+.macroclickwerk-problems-title {
     font-weight: bold;
     color: #f5c211;
 }
 
-.clickmate-problems {
+.macroclickwerk-problems {
     spacing: 8px;
     max-width: 30em;
 }
 
-.clickmate-problem {
+.macroclickwerk-problem {
     spacing: 1px;
 }
 
-.clickmate-problem-message {
+.macroclickwerk-problem-message {
     font-size: 0.9em;
 }
 
-.clickmate-problem-hint {
+.macroclickwerk-problem-hint {
     font-size: 0.85em;
     color: rgba(255, 255, 255, 0.6);
     padding-left: 10px;
@@ -63,12 +63,12 @@
 
 /* Position marker */
 
-.clickmate-marker-bar {
+.macroclickwerk-marker-bar {
     background-color: #e01b24;
     border-radius: 2px;
 }
 
-.clickmate-marker-region {
+.macroclickwerk-marker-region {
     border: 3px solid #e01b24;
     background-color: rgba(224, 27, 36, 0.12);
 }
@@ -76,11 +76,11 @@
 /* The area a running check is reading, flashed while it looks. Outline only:
    a whole-screen check flashes a stage-sized widget, and a filled one would
    composite a full-screen translucent quad for as long as it shows. */
-.clickmate-marker-flash {
+.macroclickwerk-marker-flash {
     border: 3px solid #2ec27e;
 }
 
-.clickmate-marker-label {
+.macroclickwerk-marker-label {
     padding: 3px 8px;
     border-radius: 6px;
     background-color: rgba(0, 0, 0, 0.85);
@@ -90,16 +90,16 @@
 
 /* Region picker */
 
-.clickmate-picker {
+.macroclickwerk-picker {
     background-color: rgba(0, 0, 0, 0.25);
 }
 
-.clickmate-picker-band {
+.macroclickwerk-picker-band {
     background-color: rgba(53, 132, 228, 0.25);
     border: 2px solid #3584e4;
 }
 
-.clickmate-picker-hint {
+.macroclickwerk-picker-hint {
     width: 520px;
     text-align: center;
     padding: 12px;

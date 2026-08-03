@@ -1,8 +1,8 @@
 {
-  "name": "Clickmate",
+  "name": "Macroclickwerk",
   "description": "Record, edit and replay input macros, with loops and screen-aware conditions checked by a local vision model.",
-  "uuid": "clickmate@tbocek.github.com",
-  "settings-schema": "org.gnome.shell.extensions.clickmate",
-  "url": "https://github.com/tbocek/clickmate",
+  "uuid": "macroclickwerk@tbocek.github.com",
+  "settings-schema": "org.gnome.shell.extensions.macroclickwerk",
+  "url": "https://github.com/tbocek/macroclickwerk",
   "shell-version": ["50"]
 }

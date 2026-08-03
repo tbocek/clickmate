@@ -319,12 +319,12 @@ export class LlmClient {
                 // is no telling which from the status alone. Give up the one we
                 // can most afford to lose first, and try again.
                 if (status === 400 && this._noThinking) {
-                    log('clickmate: endpoint rejected chat_template_kwargs, retrying without it');
+                    log('macroclickwerk: endpoint rejected chat_template_kwargs, retrying without it');
                     this._noThinking = false;
                     return this.ask(prompt, image, settings);
                 }
                 if (status === 400 && this._jsonMode) {
-                    log('clickmate: endpoint rejected response_format, retrying without JSON mode');
+                    log('macroclickwerk: endpoint rejected response_format, retrying without JSON mode');
                     this._jsonMode = false;
                     return this.ask(prompt, image, settings);
                 }

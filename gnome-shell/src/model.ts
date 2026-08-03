@@ -588,7 +588,7 @@ function dropRawSteps(steps: Step[]): Step[] {
     const kept: Step[] = [];
     for (const step of steps) {
         if ((step as unknown as { kind: string }).kind === 'raw') {
-            log('clickmate: dropping a verbatim step; that recording mode is gone');
+            log('macroclickwerk: dropping a verbatim step; that recording mode is gone');
             continue;
         }
         for (const list of childLists(step)) {
@@ -912,7 +912,7 @@ export function parseDocument(json: string): MacroDocument {
         // which needs saying out loud, not only in the journal.
         reportProblem('Macros', `could not read the saved macros: ${(error as Error).message}`, {
             hint: 'The list will look empty until this is fixed. The stored text is still there: ' +
-                'gsettings get org.gnome.shell.extensions.clickmate macros',
+                'gsettings get org.gnome.shell.extensions.macroclickwerk macros',
             error: error as Error,
         });
         return emptyDocument();

@@ -178,7 +178,7 @@ export class ConditionEvaluator {
             // macro down a branch on no evidence. Say so and stop.
             reportProblem('Model', message, {
                 where: describeCondition(condition),
-                hint: `Clickmate asked ${settings.endpoint || '(no endpoint set)'} — start that server, ` +
+                hint: `Macroclickwerk asked ${settings.endpoint || '(no endpoint set)'} — start that server, ` +
                     'point Settings → Model somewhere else, or replace the check with a colour test.',
             });
             throw new Error(`the model could not answer: ${message}`);

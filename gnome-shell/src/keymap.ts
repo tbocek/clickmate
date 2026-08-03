@@ -158,7 +158,7 @@ export function textToEvents(text: string, delayMs = 12): RawEvent[] {
     for (const ch of text) {
         const key = charToKey(ch);
         if (!key) {
-            log(`clickmate: cannot type character ${JSON.stringify(ch)} on the US table, skipping`);
+            log(`macroclickwerk: cannot type character ${JSON.stringify(ch)} on the US table, skipping`);
             continue;
         }
 

@@ -1,24 +1,24 @@
 {
-  "name": "clickmate",
+  "name": "macroclickwerk",
   "version": "0.0.1",
   "description": "A TypeScript GNOME Extension",
   "type": "module",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tbocek/clickmate.git"
+    "url": "git+https://github.com/tbocek/macroclickwerk.git"
   },
   "author": "Thomas Bocek",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/tbocek/clickmate/issues"
+    "url": "https://github.com/tbocek/macroclickwerk/issues"
   },
-  "homepage": "https://github.com/tbocek/clickmate",
+  "homepage": "https://github.com/tbocek/macroclickwerk",
   "sideEffects": false,
   "scripts": {
     "build": "mkdir -p dist && glib-compile-schemas schemas && npx tsc && cp -r schemas dist/ && cp stylesheet.css metadata.json dist/",
     "dev": "nodemon --exec 'sh -c \"pnpm run build\"' --ext ts,json,js --ignore dist/",
-    "dist": "pnpm run build && cd dist && zip ../clickmate.zip -9r .",
+    "dist": "pnpm run build && cd dist && zip ../macroclickwerk.zip -9r .",
     "install": "./run.sh -i",
     "test": "npm run build && gjs -m test/smoke.mjs && gjs -m test/recording.mjs && gjs -m test/resume.mjs && GI_TYPELIB_PATH=/usr/lib/gnome-shell/girepository-1.0 LD_LIBRARY_PATH=/usr/lib/gnome-shell gjs -m test/prefsload.mjs"
   },

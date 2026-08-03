@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-    <schema id="org.gnome.shell.extensions.clickmate" path="/org/gnome/shell/extensions/clickmate/">
+    <schema id="org.gnome.shell.extensions.macroclickwerk" path="/org/gnome/shell/extensions/macroclickwerk/">
 
         <!-- The whole macro document, serialised as JSON. Shared between the
              shell process and the preferences process; both watch for changes. -->
@@ -196,13 +196,13 @@
 
         <!-- Daemon -->
         <key name="control-socket" type="s">
-            <default>'/var/run/click-socket'</default>
+            <default>'/var/run/macroclickwerk-socket'</default>
             <summary>Daemon control socket</summary>
             <description>Unix socket the daemon serves its JSON API on</description>
         </key>
 
         <key name="event-socket" type="s">
-            <default>'/var/run/clickmate-events'</default>
+            <default>'/var/run/macroclickwerk-events'</default>
             <summary>Daemon event socket</summary>
             <description>Unix socket the daemon streams recorded input events on</description>
         </key>

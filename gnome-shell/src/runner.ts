@@ -302,7 +302,7 @@ export class MacroRunner {
             // failing it can leave a modifier stuck down.
             reportProblem('Daemon', `could not send the stop request: ${(error as Error).message}`, {
                 hint: 'A key or button held by the macro may still be down. Check that the ' +
-                    'clickmate service is running: systemctl status clickmate.',
+                    'macroclickwerk service is running: systemctl status macroclickwerk.',
             });
         });
     }

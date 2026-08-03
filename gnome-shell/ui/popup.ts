@@ -74,13 +74,13 @@ export class MacroPopup {
         this._stopItem.connect('activate', () => this._deps.onStop());
         this._stopItem.visible = false;   // nothing to stop until something runs
 
-        this._statusLabel = new St.Label({ text: 'Idle', style_class: 'clickmate-status' });
-        this._detailLabel = wrappingLabel('', 'clickmate-detail');
+        this._statusLabel = new St.Label({ text: 'Idle', style_class: 'macroclickwerk-status' });
+        this._detailLabel = wrappingLabel('', 'macroclickwerk-detail');
         this._detailLabel.visible = false;
 
         this._problemItem = new PopupMenu.PopupBaseMenuItem({ reactive: false, can_focus: false });
-        this._problemHeader = new St.Label({ text: '', style_class: 'clickmate-problems-title' });
-        this._problemList = new St.BoxLayout({ vertical: true, style_class: 'clickmate-problems' });
+        this._problemHeader = new St.Label({ text: '', style_class: 'macroclickwerk-problems-title' });
+        this._problemList = new St.BoxLayout({ vertical: true, style_class: 'macroclickwerk-problems' });
         this._clearItem = new PopupMenu.PopupMenuItem('Clear problems');
         this._clearItem.connect('activate', () => clearProblems());
 
@@ -95,17 +95,17 @@ export class MacroPopup {
         menu.addMenuItem(this._stopItem);
 
         const statusItem = new PopupMenu.PopupBaseMenuItem({ reactive: false, can_focus: false });
-        const box = new St.BoxLayout({ vertical: true, style_class: 'clickmate-status-box' });
+        const box = new St.BoxLayout({ vertical: true, style_class: 'macroclickwerk-status-box' });
         box.add_child(this._statusLabel);
         box.add_child(this._detailLabel);
         statusItem.add_child(box);
         menu.addMenuItem(statusItem);
 
-        const problemBox = new St.BoxLayout({ vertical: true, style_class: 'clickmate-status-box' });
-        const heading = new St.BoxLayout({ style_class: 'clickmate-problems-heading' });
+        const problemBox = new St.BoxLayout({ vertical: true, style_class: 'macroclickwerk-status-box' });
+        const heading = new St.BoxLayout({ style_class: 'macroclickwerk-problems-heading' });
         heading.add_child(new St.Icon({
             icon_name: 'dialog-warning-symbolic',
-            style_class: 'clickmate-problems-icon popup-menu-icon',
+            style_class: 'macroclickwerk-problems-icon popup-menu-icon',
         }));
         heading.add_child(this._problemHeader);
         problemBox.add_child(heading);
@@ -233,24 +233,24 @@ export class MacroPopup {
         if (problems.length > SHOWN_PROBLEMS) {
             this._problemList.add_child(new St.Label({
                 text: `and ${problems.length - SHOWN_PROBLEMS} more — see journalctl /usr/bin/gnome-shell`,
-                style_class: 'clickmate-problem-hint',
+                style_class: 'macroclickwerk-problem-hint',
             }));
         }
     }
 
     private _problemWidget(problem: Problem): St.BoxLayout {
-        const box = new St.BoxLayout({ vertical: true, style_class: 'clickmate-problem' });
+        const box = new St.BoxLayout({ vertical: true, style_class: 'macroclickwerk-problem' });
 
         const repeat = problem.count > 1 ? ` (×${problem.count})` : '';
         box.add_child(wrappingLabel(
             `${problem.time}  ${problem.source} — ${problem.message}${repeat}`,
-            'clickmate-problem-message',
+            'macroclickwerk-problem-message',
         ));
         if (problem.where) {
-            box.add_child(wrappingLabel(`in ${problem.where}`, 'clickmate-problem-hint'));
+            box.add_child(wrappingLabel(`in ${problem.where}`, 'macroclickwerk-problem-hint'));
         }
         if (problem.hint) {
-            box.add_child(wrappingLabel(problem.hint, 'clickmate-problem-hint'));
+            box.add_child(wrappingLabel(problem.hint, 'macroclickwerk-problem-hint'));
         }
         return box;
     }

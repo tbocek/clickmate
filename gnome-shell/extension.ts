@@ -1,4 +1,4 @@
-// Clickmate: record, edit and replay input macros with optional screen-aware
+// Macroclickwerk: record, edit and replay input macros with optional screen-aware
 // conditions. The shell side owns all control flow; the daemon only injects and
 // observes evdev events.
 
@@ -46,7 +46,7 @@ interface CaptureTarget {
     listKey?: string | null;
 }
 
-export default class ClickmateExtension extends Extension {
+export default class MacroclickwerkExtension extends Extension {
     private _settings?: Gio.Settings;
     private _store?: MacroStore;
     private _daemon?: DaemonClient;
@@ -95,11 +95,11 @@ export default class ClickmateExtension extends Extension {
             onStatus: text => this._onStatus(text),
             onError: error => {
                 reportProblem('Recording', `the recording stopped: ${error.message}`, {
-                    hint: 'Anything after this point was not recorded. Check that the clickmate ' +
-                        'service is running: systemctl status clickmate.',
+                    hint: 'Anything after this point was not recorded. Check that the macroclickwerk ' +
+                        'service is running: systemctl status macroclickwerk.',
                     error,
                 });
-                Main.notify('Clickmate', `Recording stopped: ${error.message}`);
+                Main.notify('Macroclickwerk', `Recording stopped: ${error.message}`);
             },
             onBusyChanged: () => this._updateIcon(),
         });
@@ -134,7 +134,7 @@ export default class ClickmateExtension extends Extension {
         this._popup?.refresh();
 
         // Asked once at startup rather than only when the menu opens: a daemon
-        // that is not running is the single most common reason for clickmate
+        // that is not running is the single most common reason for macroclickwerk
         // doing nothing at all, and the warning icon is what points at it.
         void this._checkDaemon();
     }
@@ -265,24 +265,24 @@ export default class ClickmateExtension extends Extension {
         // a whole macro recording, and reads the same way in the panel.
         if (this._recorder?.busy) {
             this._icon.icon_name = 'media-record-symbolic';
-            this._icon.add_style_class_name('clickmate-recording');
+            this._icon.add_style_class_name('macroclickwerk-recording');
         } else if (this._runningMacros().length > 0) {
             this._icon.icon_name = 'media-playback-start-symbolic';
-            this._icon.remove_style_class_name('clickmate-recording');
+            this._icon.remove_style_class_name('macroclickwerk-recording');
         } else if (problems) {
             // Only when nothing is happening: a running macro reporting a
             // recoverable failure should still read as running.
             this._icon.icon_name = 'dialog-warning-symbolic';
-            this._icon.remove_style_class_name('clickmate-recording');
+            this._icon.remove_style_class_name('macroclickwerk-recording');
         } else {
             this._icon.icon_name = 'input-mouse-symbolic';
-            this._icon.remove_style_class_name('clickmate-recording');
+            this._icon.remove_style_class_name('macroclickwerk-recording');
         }
 
         if (problems) {
-            this._icon.add_style_class_name('clickmate-problem-icon');
+            this._icon.add_style_class_name('macroclickwerk-problem-icon');
         } else {
-            this._icon.remove_style_class_name('clickmate-problem-icon');
+            this._icon.remove_style_class_name('macroclickwerk-problem-icon');
         }
 
         // The editor is usually the window you are looking at while this
@@ -417,7 +417,7 @@ export default class ClickmateExtension extends Extension {
         // The runner has already filed the problem; this is only the
         // interruption, for the case where the menu is closed.
         if (reason === 'error' && error) {
-            Main.notify('Clickmate', `“${macro?.name ?? 'Macro'}” failed: ${error.message}`);
+            Main.notify('Macroclickwerk', `“${macro?.name ?? 'Macro'}” failed: ${error.message}`);
         }
         this._popup?.refresh();
     }
@@ -449,7 +449,7 @@ export default class ClickmateExtension extends Extension {
     private _runEnabled(): void {
         const macros = this._store?.enabledMacros ?? [];
         if (macros.length === 0) {
-            Main.notify('Clickmate', this._store?.macros.length
+            Main.notify('Macroclickwerk', this._store?.macros.length
                 ? 'No macro is switched on. Turn one on in Settings.'
                 : 'No macros yet. Add one in Settings.');
             this._popup?.refresh();
@@ -619,14 +619,14 @@ export default class ClickmateExtension extends Extension {
         }
 
         this._indicator?.menu.close(true);
-        Main.notify('Clickmate', 'Click anywhere to capture it, or move the pointer and hold still.');
+        Main.notify('Macroclickwerk', 'Click anywhere to capture it, or move the pointer and hold still.');
 
         let step: Step | null = null;
         try {
             step = await this._recorder!.captureOne();
         } catch (error) {
             return fail((error as Error).message,
-                'Check that the clickmate service is running: systemctl status clickmate');
+                'Check that the macroclickwerk service is running: systemctl status macroclickwerk');
         }
 
         if (!step) {
@@ -638,7 +638,7 @@ export default class ClickmateExtension extends Extension {
         this._store.save();
 
         const message = `Added: ${describeStep(step)}`;
-        Main.notify('Clickmate', message);
+        Main.notify('Macroclickwerk', message);
         return { ok: true, message };
     }
 
@@ -662,14 +662,14 @@ export default class ClickmateExtension extends Extension {
         }
 
         this._indicator?.menu.close(true);
-        Main.notify('Clickmate', 'Click the position, or move the pointer there and hold still.');
+        Main.notify('Macroclickwerk', 'Click the position, or move the pointer there and hold still.');
 
         let step: Step | null = null;
         try {
             step = await this._recorder.captureOne();
         } catch (error) {
             return fail((error as Error).message,
-                'Check that the clickmate service is running: systemctl status clickmate');
+                'Check that the macroclickwerk service is running: systemctl status macroclickwerk');
         }
 
         // A click gives its position and a pointer that stopped gives where it
@@ -816,7 +816,7 @@ export default class ClickmateExtension extends Extension {
         }
         const macro = this._store.activeMacro;
         if (!macro) {
-            Main.notify('Clickmate', 'Create a macro before recording.');
+            Main.notify('Macroclickwerk', 'Create a macro before recording.');
             return { recording: false, problem: 'create a macro before recording' };
         }
 
@@ -842,7 +842,7 @@ export default class ClickmateExtension extends Extension {
                     hint: 'They landed after an endless loop. Open Settings → Macros and drag them ' +
                         'into the loop body.',
                 });
-                Main.notify('Clickmate', warning);
+                Main.notify('Macroclickwerk', warning);
             }
             return { recording: false };
         }
@@ -861,15 +861,15 @@ export default class ClickmateExtension extends Extension {
         } catch (error) {
             reportProblem('Recording', `could not start: ${(error as Error).message}`, {
                 hint: 'The daemon has to be running and capturing your devices. ' +
-                    'Check it with: systemctl status clickmate',
+                    'Check it with: systemctl status macroclickwerk',
                 error: error as Error,
             });
-            Main.notify('Clickmate', `Could not start recording: ${(error as Error).message}`);
+            Main.notify('Macroclickwerk', `Could not start recording: ${(error as Error).message}`);
             this._updateIcon();
             return { recording: false, problem: (error as Error).message };
         }
         const where = this._recordTarget(macro).where;
-        Main.notify('Clickmate', `Recording into “${macro.name}”${where ? `, ${where}` : ''}. ` +
+        Main.notify('Macroclickwerk', `Recording into “${macro.name}”${where ? `, ${where}` : ''}. ` +
             'Press the shortcut again to stop.');
         this._updateIcon();
         return { recording: true };
@@ -996,19 +996,19 @@ export default class ClickmateExtension extends Extension {
             const status = await this._daemon.status();
             if (status.version < 2) {
                 reportProblem('Daemon', `it speaks protocol v${status.version}, this extension needs v2`, {
-                    hint: 'Rebuild and reinstall it: cd clickmate && ./deploy.sh',
+                    hint: 'Rebuild and reinstall it: cd macroclickwerk && ./deploy.sh',
                 });
             } else if (status.devices.length === 0) {
                 reportProblem('Daemon', 'it captured no input devices', {
                     hint: 'Nothing can be recorded or replayed. The device names in ' +
-                        '/etc/systemd/system/clickmate.service must match this machine — list them with ' +
+                        '/etc/systemd/system/macroclickwerk.service must match this machine — list them with ' +
                         "grep '^N: Name' /proc/bus/input/devices",
                 });
             }
         } catch (error) {
             reportProblem('Daemon', `cannot reach it at ${this._daemon.controlPath}: ${(error as Error).message}`, {
                 hint: 'Nothing can be recorded or replayed until it answers. ' +
-                    'Check it with: systemctl status clickmate',
+                    'Check it with: systemctl status macroclickwerk',
             });
         }
     }

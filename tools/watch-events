@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watch what the clickmate daemon is capturing.
+"""Watch what the macroclickwerk daemon is capturing.
 
 Turns recording on, decodes the event stream to readable lines, and turns
 recording off again on exit. Useful on its own — if a device does not show up
@@ -16,8 +16,8 @@ import socket
 import sys
 import time
 
-CONTROL = os.environ.get("CLICKMATE_SOCKET", "/var/run/click-socket")
-EVENTS = os.environ.get("CLICKMATE_EVENT_SOCKET", "/var/run/clickmate-events")
+CONTROL = os.environ.get("MACROCLICKWERK_SOCKET", "/var/run/macroclickwerk-socket")
+EVENTS = os.environ.get("MACROCLICKWERK_EVENT_SOCKET", "/var/run/macroclickwerk-events")
 
 EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC = 0, 1, 2, 3, 4
 EV_NAMES = {EV_SYN: "SYN", EV_KEY: "KEY", EV_REL: "REL", EV_ABS: "ABS", EV_MSC: "MSC"}
@@ -86,7 +86,7 @@ def main():
         status = request("GET", "/status")
     except OSError as error:
         sys.exit(f"cannot reach the daemon at {CONTROL}: {error}\n"
-                 f"is it running?  systemctl status clickmate")
+                 f"is it running?  systemctl status macroclickwerk")
 
     devices = {d["index"]: os.path.basename(d["path"]) or d["name"] for d in status["devices"]}
     print(f"daemon API v{status['version']}, capturing:")
@@ -140,7 +140,7 @@ def main():
     silent = [d for i, d in sorted(devices.items()) if not seen.get(i)]
     if silent and seen:
         print("\nsilent devices are fine if you did not use them — but if the device you\n"
-              "were using is missing from the list entirely, add it with -n in clickmate.service")
+              "were using is missing from the list entirely, add it with -n in macroclickwerk.service")
 
 
 if __name__ == "__main__":

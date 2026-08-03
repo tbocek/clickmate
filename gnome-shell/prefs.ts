@@ -43,8 +43,8 @@ import { buildInstruction, testConnection } from './src/llm.js';
 
 const CONDITION_TYPES: ConditionType[] = ['always', 'llm', 'color', 'and', 'or', 'not'];
 
-const MACROS_FILE = 'clickmate-macros.json';
-const SETTINGS_FILE = 'clickmate-settings.json';
+const MACROS_FILE = 'macroclickwerk-macros.json';
+const SETTINGS_FILE = 'macroclickwerk-settings.json';
 
 /**
  * Keys the settings file leaves alone. The macros live in their own export, and
@@ -162,41 +162,41 @@ const BRANCH_STYLE: Record<BranchKind, { icon: string; title: string; hint: stri
  * state rails simply overwrite the branch rail instead of stacking beside it.
  */
 const EDITOR_CSS = `
-.clickmate-branch {
+.macroclickwerk-branch {
     box-shadow: inset 4px 0 0 alpha(@accent_bg_color, 0.85);
     background-color: alpha(@accent_bg_color, 0.06);
 }
-.clickmate-branch-then {
+.macroclickwerk-branch-then {
     box-shadow: inset 4px 0 0 alpha(@success_color, 0.9);
     background-color: alpha(@success_color, 0.06);
 }
-.clickmate-branch-else {
+.macroclickwerk-branch-else {
     box-shadow: inset 4px 0 0 alpha(@warning_color, 0.9);
     background-color: alpha(@warning_color, 0.06);
 }
 
-.clickmate-running {
+.macroclickwerk-running {
     background-color: alpha(@accent_bg_color, 0.28);
     box-shadow: inset 4px 0 0 @accent_bg_color;
 }
-.clickmate-running-block { box-shadow: inset 4px 0 0 @accent_bg_color; }
-.clickmate-running-icon { color: @accent_bg_color; }
-.clickmate-running-parent-icon { color: alpha(@accent_bg_color, 0.7); }
+.macroclickwerk-running-block { box-shadow: inset 4px 0 0 @accent_bg_color; }
+.macroclickwerk-running-icon { color: @accent_bg_color; }
+.macroclickwerk-running-parent-icon { color: alpha(@accent_bg_color, 0.7); }
 
 /* Where recorded steps land. Faint while it is only a choice; unmistakable
    while the recording is actually running and the next click goes in here. A
    row that opens gets the rail only — a fill would run down everything inside
    it and read as though all of that were selected too. */
-.clickmate-record-target {
+.macroclickwerk-record-target {
     background-color: alpha(@error_color, 0.10);
     box-shadow: inset 4px 0 0 alpha(@error_color, 0.55);
 }
-.clickmate-record-target-block { box-shadow: inset 4px 0 0 alpha(@error_color, 0.55); }
-.clickmate-recording-now {
+.macroclickwerk-record-target-block { box-shadow: inset 4px 0 0 alpha(@error_color, 0.55); }
+.macroclickwerk-recording-now {
     background-color: alpha(@error_color, 0.28);
     box-shadow: inset 4px 0 0 @error_color;
 }
-.clickmate-recording-now-block { box-shadow: inset 4px 0 0 @error_color; }
+.macroclickwerk-recording-now-block { box-shadow: inset 4px 0 0 @error_color; }
 `;
 
 /** How far a step inside a body sits in from the rail of that body. */
@@ -388,7 +388,7 @@ interface StepRow {
     branchRows: Adw.ExpanderRow[];
 }
 
-export default class ClickmatePreferences extends ExtensionPreferences {
+export default class MacroclickwerkPreferences extends ExtensionPreferences {
     private _settings!: Gio.Settings;
     private _store!: MacroStore;
     private _window?: Adw.PreferencesWindow;
@@ -682,7 +682,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
         } catch (error) {
             // Cosmetic only: an unparsable rule must not cost you the editor.
-            log(`clickmate: could not load editor styles: ${(error as Error).message}`);
+            log(`macroclickwerk: could not load editor styles: ${(error as Error).message}`);
         }
     }
 
@@ -942,9 +942,9 @@ export default class ClickmatePreferences extends ExtensionPreferences {
             : 'media-playback-start-symbolic');
         button.set_tooltip_text(running ? _('Stop this macro') : _('Run this macro now'));
         if (running) {
-            button.add_css_class('clickmate-running-icon');
+            button.add_css_class('macroclickwerk-running-icon');
         } else {
-            button.remove_css_class('clickmate-running-icon');
+            button.remove_css_class('macroclickwerk-running-icon');
         }
     }
 
@@ -961,7 +961,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
      * icon is a long way from the body you chose.
      */
     private _applyRecordTarget(): void {
-        for (const cls of ['clickmate-record-target', 'clickmate-recording-now']) {
+        for (const cls of ['macroclickwerk-record-target', 'macroclickwerk-recording-now']) {
             this._markedRow?.remove_css_class(cls);
             this._markedRow?.remove_css_class(`${cls}-block`);
         }
@@ -976,7 +976,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const recording = this._settings.get_string('recording') !== '';
         if (row) {
-            const base = recording ? 'clickmate-recording-now' : 'clickmate-record-target';
+            const base = recording ? 'macroclickwerk-recording-now' : 'macroclickwerk-record-target';
             row.add_css_class(row instanceof Adw.ExpanderRow ? `${base}-block` : base);
         }
 
@@ -1061,30 +1061,30 @@ export default class ClickmatePreferences extends ExtensionPreferences {
     }
 
     private _setRunState(entry: StepRow, state: 'idle' | 'active' | 'ancestor'): void {
-        for (const cls of ['clickmate-running', 'clickmate-running-block']) {
+        for (const cls of ['macroclickwerk-running', 'macroclickwerk-running-block']) {
             entry.row.remove_css_class(cls);
         }
-        for (const cls of ['clickmate-running-icon', 'clickmate-running-parent-icon']) {
+        for (const cls of ['macroclickwerk-running-icon', 'macroclickwerk-running-parent-icon']) {
             entry.icon.remove_css_class(cls);
         }
         entry.icon.icon_name = entry.kindIcon;
         for (const branch of entry.branchRows) {
-            branch.remove_css_class('clickmate-running-block');
+            branch.remove_css_class('macroclickwerk-running-block');
         }
 
         if (state === 'active') {
             entry.icon.icon_name = 'media-playback-start-symbolic';
-            entry.icon.add_css_class('clickmate-running-icon');
-            entry.row.add_css_class(entry.container ? 'clickmate-running-block' : 'clickmate-running');
+            entry.icon.add_css_class('macroclickwerk-running-icon');
+            entry.row.add_css_class(entry.container ? 'macroclickwerk-running-block' : 'macroclickwerk-running');
         } else if (state === 'ancestor') {
-            entry.icon.add_css_class('clickmate-running-parent-icon');
-            entry.row.add_css_class('clickmate-running-block');
+            entry.icon.add_css_class('macroclickwerk-running-parent-icon');
+            entry.row.add_css_class('macroclickwerk-running-block');
         }
         if (state !== 'idle') {
             // The body headers sit beside the step now, not inside it, so they
             // need the same rail or the chain of rails breaks at every loop.
             for (const branch of entry.branchRows) {
-                branch.add_css_class('clickmate-running-block');
+                branch.add_css_class('macroclickwerk-running-block');
             }
         }
     }
@@ -1431,8 +1431,8 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 // block of its own gets a selection of its own.
                 this._selectable(nested, `in:${step.id}:${list.key}`, macro.id);
             }
-            nested.add_css_class('clickmate-branch');
-            nested.add_css_class(`clickmate-branch-${kind}`);
+            nested.add_css_class('macroclickwerk-branch');
+            nested.add_css_class(`macroclickwerk-branch-${kind}`);
             this._branchRows.set(`${step.id}:${list.key}`, nested);
 
             const addNested = this._addStepRow(list.steps, macro.id, step.id, list.key);
@@ -1979,7 +1979,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
                 }
             }
             try {
-                const file = { type: 'clickmate-settings', version: 1, settings: values };
+                const file = { type: 'macroclickwerk-settings', version: 1, settings: values };
                 GLib.file_set_contents(path, `${JSON.stringify(file, null, 2)}\n`);
                 this._toast(`Exported ${Object.keys(values).length} settings to ${path}`);
             } catch (error) {
@@ -2056,7 +2056,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
     /** Adwaita's own toast where the window has one, the journal either way. */
     private _toast(message: string): void {
-        log(`clickmate: ${message}`);
+        log(`macroclickwerk: ${message}`);
         const window = this._window as unknown as { add_toast?: (toast: object) => void } | undefined;
         if (typeof window?.add_toast === 'function') {
             window.add_toast(new Adw.Toast({ title: message, timeout: 5 }));
@@ -2326,7 +2326,7 @@ export default class ClickmatePreferences extends ExtensionPreferences {
 
         const daemon = new Adw.PreferencesGroup({
             title: _('Daemon'),
-            description: _('Injects and observes events. Start it with: sudo systemctl start clickmate'),
+            description: _('Injects and observes events. Start it with: sudo systemctl start macroclickwerk'),
         });
         daemon.add(entryRow(_('Control socket'), this._settings.get_string('control-socket'), text => {
             this._settings.set_string('control-socket', text);

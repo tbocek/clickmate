@@ -1,5 +1,5 @@
 [Unit]
-Description=Clickmate input service (macro recording and playback)
+Description=Macroclickwerk input service (macro recording and playback)
 Wants=graphical.target
 
 [Install]
@@ -20,12 +20,12 @@ WantedBy=graphical.target
 # A name that matches nothing is only a warning, and the device is picked up on
 # its own once it appears — this unit needs no ordering against whatever
 # creates the devices it names. For example, behind a dvorak remapper (which
-# must be told to leave clickmate's clones alone:
-#   ExecStart=/usr/local/bin/dvorak -d /dev/input/%i -i "clickmate virtual"):
-#   ExecStart=/usr/local/bin/clickmate \
+# must be told to leave macroclickwerk's clones alone:
+#   ExecStart=/usr/local/bin/dvorak -d /dev/input/%i -i "macroclickwerk virtual"):
+#   ExecStart=/usr/local/bin/macroclickwerk \
 #     -n "Virtual Dvorak Keyboard" \
 #     -n "Logitech Signature M650 L"
-ExecStart=/usr/local/bin/clickmate -a
+ExecStart=/usr/local/bin/macroclickwerk -a
 Restart=on-failure
 RestartSec=2
 StandardOutput=null

@@ -1,9 +1,9 @@
-# Clickmate
+# Macroclickwerk
 
 Record, edit and replay input macros on GNOME/Wayland — with loops, and with
 conditions that can look at the screen.
 
-![Clickmate Extension Screenshot](docs/screenshot.png)
+![Macroclickwerk Extension Screenshot](docs/screenshot.png)
 
 A macro is a tree of steps: clicks, key presses, typed text, scrolls, waits and
 recorded event trains. Around them you can put `loop` and `if` blocks. A loop
@@ -58,7 +58,7 @@ repeat forever:
 
 | Piece | Role |
 |---|---|
-| `clickmate.c` | Root daemon. Grabs the real input devices, mirrors them to uinput clones, injects event trains on request, and streams observed events while recording. Always forwards real input. **No macro logic.** |
+| `macroclickwerk.c` | Root daemon. Grabs the real input devices, mirrors them to uinput clones, injects event trains on request, and streams observed events while recording. Always forwards real input. **No macro logic.** |
 | `gnome-shell/` | The extension. Owns the macro model, the editor UI, all control flow, screenshots and the model calls. |
 
 The split is deliberate: the daemon is the only thing that can see and synthesise
@@ -101,6 +101,24 @@ Rebuilds and installs the daemon, rebuilds the extension, and prints what the
 daemon captured. Run it as yourself — it asks for sudo only for the daemon. Then
 log out and back in.
 
+### Upgrading from Clickmate
+
+Macroclickwerk is the project formerly named Clickmate, and the rename runs
+through every identifier — service, sockets, extension UUID, settings schema —
+so an old installation is a separate thing, to be removed once:
+
+```bash
+sudo systemctl disable --now clickmate
+sudo rm -f /usr/local/bin/clickmate /etc/systemd/system/clickmate.service \
+    /usr/lib/systemd/system-sleep/clickmate
+rm -rf ~/.local/share/gnome-shell/extensions/clickmate@tbocek.github.com
+```
+
+Macros live under the settings schema, so they do not carry over on their own:
+**before** removing the old extension, export them (Settings → Backup →
+Export → Macros) and import the file into Macroclickwerk — the same round trip
+works for settings.
+
 The two halves separately:
 
 ### Daemon
@@ -110,7 +128,7 @@ make
 sudo make install
 ```
 
-`clickmate.service` runs the daemon with `-a`: every keyboard and pointer is
+`macroclickwerk.service` runs the daemon with `-a`: every keyboard and pointer is
 captured automatically, so the installation works on any machine without
 editing anything. A device another process holds exclusively — a key remapper's
 real keyboard, say — is left to it, and the remapper's virtual output is
@@ -139,10 +157,10 @@ it does is recorded or observed.
 Devices do not have to exist when the daemon starts. `/dev/input` is watched, so
 anything matching is captured when it appears and reattached when it comes back
 after being unplugged. That matters more than it sounds: a wireless mouse often
-pairs a second or two into boot, and a remapper upstream of clickmate rebuilds
+pairs a second or two into boot, and a remapper upstream of macroclickwerk rebuilds
 its virtual keyboard every time it is restarted. Both used to leave the daemon
 running against devices that no longer existed, with nothing but a line in the
-journal to say so. `journalctl -u clickmate -f` shows `captured`, `reattached`
+journal to say so. `journalctl -u macroclickwerk -f` shows `captured`, `reattached`
 and `detached` as they happen.
 
 The daemon takes an exclusive grab on those devices. The kernel drops a grab when
@@ -158,7 +176,7 @@ is playing is aborted and every held key released — nothing stays pressed, or
 keeps playing, across a sleep the desktop never sees. The daemon itself stays
 running; devices that re-enumerate on resume are re-captured by its hotplug
 watch. (`SIGUSR1` to the daemon is that same stop-and-release, available from
-anywhere; the sleep hook is just `systemctl kill -s SIGUSR1 clickmate`.)
+anywhere; the sleep hook is just `systemctl kill -s SIGUSR1 macroclickwerk`.)
 
 ### Extension
 
@@ -169,7 +187,7 @@ pnpm run build
 pnpm run install     # symlinks dist/ into ~/.local/share/gnome-shell/extensions
 ```
 
-Log out and back in (Wayland has no `Alt+F2 r`), then enable *Clickmate*.
+Log out and back in (Wayland has no `Alt+F2 r`), then enable *Macroclickwerk*.
 
 ### A local vision model
 
@@ -388,14 +406,14 @@ At the top of the Macros page, **Backup** has an **Export** and an **Import**,
 each offering **Macros** or **Settings** — two files, because they move for
 different reasons: the steps are the work, the settings are the machine they run
 on. Both open a file chooser, so where a backup goes and which one comes back is
-yours to say; the names `clickmate-macros.json` and `clickmate-settings.json` are
+yours to say; the names `macroclickwerk-macros.json` and `macroclickwerk-settings.json` are
 only what the save dialog starts with. Importing macros replaces every macro you
 have. Importing settings skips anything the schema does not know or will not
 take, and says which keys it ignored.
 
 ### Daemon HTTP API
 
-Over the unix socket at `/var/run/click-socket`. One thing to know before
+Over the unix socket at `/var/run/macroclickwerk-socket`. One thing to know before
 driving it directly: the daemon speaks raw evdev, and its virtual mouse is a
 **relative** device — pointer motion through `/play` is `REL_X`/`REL_Y`, with
 the compositor's acceleration curve applied to whatever you send. Absolute
@@ -405,15 +423,15 @@ through the daemon. The raw API has no such convergence — a delta in means an
 accelerated delta out.
 
 ```bash
-curl --unix-socket /var/run/click-socket http://localhost/status
+curl --unix-socket /var/run/macroclickwerk-socket http://localhost/status
 
 # left click: press, then release 50 ms later
-curl --unix-socket /var/run/click-socket -X POST \
+curl --unix-socket /var/run/macroclickwerk-socket -X POST \
   -d '{"events":[{"dt":0,"type":1,"code":272,"value":1},{"dt":50000,"type":1,"code":272,"value":0}]}' \
   http://localhost/play
 
-curl --unix-socket /var/run/click-socket -X POST -d '{"on":true}'  http://localhost/record
-curl --unix-socket /var/run/click-socket -X POST -d '{}'           http://localhost/stop
+curl --unix-socket /var/run/macroclickwerk-socket -X POST -d '{"on":true}'  http://localhost/record
+curl --unix-socket /var/run/macroclickwerk-socket -X POST -d '{}'           http://localhost/stop
 ```
 
 ### Checking what is captured
@@ -430,18 +448,18 @@ tools/watch-events 15 --raw
 
 If a device does not appear here, nothing above the daemon can see it either.
 With `-a` that means it did not look like a keyboard or pointer, or something
-else holds it exclusively — name it in `clickmate.service` with `-n "<its
+else holds it exclusively — name it in `macroclickwerk.service` with `-n "<its
 name>"` to insist.
 
 Or by hand (`socat` works too, if you have it):
 
 ```bash
-curl --unix-socket /var/run/click-socket -X POST -d '{"on":true}' http://localhost/record
+curl --unix-socket /var/run/macroclickwerk-socket -X POST -d '{"on":true}' http://localhost/record
 python3 -c "
 import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect('/var/run/clickmate-events')
+s.connect('/var/run/macroclickwerk-events')
 [print(s.recv(4096).decode(), end='') for _ in range(20)]"
-curl --unix-socket /var/run/click-socket -X POST -d '{"on":false}' http://localhost/record
+curl --unix-socket /var/run/macroclickwerk-socket -X POST -d '{"on":false}' http://localhost/record
 ```
 
 `dt` is microseconds to wait *before* the event; `type`/`code`/`value` are raw
@@ -473,7 +491,7 @@ Cross-check injected input with `sudo libinput debug-events` and `sudo evtest`.
 
 ```bash
 sudo make uninstall
-rm ~/.local/share/gnome-shell/extensions/clickmate@tbocek.github.com
+rm ~/.local/share/gnome-shell/extensions/macroclickwerk@tbocek.github.com
 ```
 
 ### Resolving a boot delay
@@ -487,9 +505,9 @@ systemctl mask systemd-udev-settle.service
 
 ## Troubleshooting
 
-- **Popup says it cannot reach the daemon** — `systemctl status clickmate`, and
+- **Popup says it cannot reach the daemon** — `systemctl status macroclickwerk`, and
   check the socket path in *Preferences → Input*.
-- **"The clickmate daemon is out of date"** — the extension needs API v2; rerun
+- **"The macroclickwerk daemon is out of date"** — the extension needs API v2; rerun
   `sudo make install`.
 - **Clicks land in the wrong place** — check whether the target grabs the
   pointer (see *Absolute positioning*); the status line reports a move that

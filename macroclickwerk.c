@@ -1,4 +1,4 @@
-// clickmate - generic evdev input service for macro recording and playback.
+// macroclickwerk - generic evdev input service for macro recording and playback.
 //
 // Each device passed with -d is grabbed (EVIOCGRAB), cloned to a uinput device
 // and forwarded event-for-event, exactly as the original autoclicker did. On top
@@ -32,8 +32,8 @@
 #include <sys/inotify.h>
 #include <poll.h>
 
-#define SOCKET_PATH       "/var/run/click-socket"
-#define EVENT_SOCKET_PATH "/var/run/clickmate-events"
+#define SOCKET_PATH       "/var/run/macroclickwerk-socket"
+#define EVENT_SOCKET_PATH "/var/run/macroclickwerk-events"
 
 #define MAX_DEVICES        8
 #define MAX_STREAM_CLIENTS 8
@@ -490,7 +490,7 @@ static void* reader_thread(void *arg) {
     d->alive = false;
     pthread_mutex_unlock(&devices_mutex);
 
-    fprintf(stderr, "clickmate: detached %s\n", d->path ? d->path : d->name);
+    fprintf(stderr, "macroclickwerk: detached %s\n", d->path ? d->path : d->name);
     return NULL;
 }
 
@@ -921,7 +921,7 @@ static bool setup_device(const char *path, const char *wanted) {
     }
 
     char clone_name[64];
-    snprintf(clone_name, sizeof(clone_name), "Clickmate Virtual Device %d", device_count);
+    snprintf(clone_name, sizeof(clone_name), "Macroclickwerk Virtual Device %d", device_count);
     if (!create_clone(d, clone_name, 0)) {
         close(d->fdi);
         d->fdi = -1;
@@ -943,7 +943,7 @@ static bool setup_device(const char *path, const char *wanted) {
     // stderr, not stdout: the unit sends stdout to /dev/null, and what was
     // actually captured is the first thing you want to see when a device turns
     // out to be missing.
-    fprintf(stderr, "clickmate: captured %s%s%s%s\n",
+    fprintf(stderr, "macroclickwerk: captured %s%s%s%s\n",
             path,
             d->grabbed ? "" : " (not grabbed)",
             (d->cls & CLASS_KEYBOARD) ? " [keys]" : "",
@@ -996,7 +996,7 @@ static bool attach_device(const char *path, const char *wanted) {
         // would make the desktop lose and re-find the input device — and lose
         // any modifier state along with it — on every reconnect.
         d->alive = true;
-        fprintf(stderr, "clickmate: reattached %s as %s%s\n",
+        fprintf(stderr, "macroclickwerk: reattached %s as %s%s\n",
                 path, d->name, d->grabbed ? "" : " (not grabbed)");
         start_reader(d);
         return true;
@@ -1068,7 +1068,7 @@ static void rescan(bool verbose) {
         // Never look at our own clones — capturing one would feed every event
         // straight back into itself — and decided before the probe below, so
         // not even a momentary test-grab ever lands on a clone mid-playback.
-        if (!named || strncmp(e->name, "Clickmate", 9) == 0) {
+        if (!named || strncmp(e->name, "Macroclickwerk", strlen("Macroclickwerk")) == 0) {
             close(fd);
             continue;
         }
@@ -1239,7 +1239,7 @@ static bool ensure_class(int cls, const char *name) {
 }
 
 int main(int argc, char *argv[]) {
-    printf("[DEBUG] Starting clickmate input service (API v%d)\n", API_VERSION);
+    printf("[DEBUG] Starting macroclickwerk input service (API v%d)\n", API_VERSION);
 
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, sig_handler);
@@ -1291,8 +1291,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Warning: nothing captured yet. Waiting for the requested devices.\n");
     }
 
-    if (!ensure_class(CLASS_KEYBOARD, "Clickmate Virtual Keyboard") ||
-        !ensure_class(CLASS_POINTER, "Clickmate Virtual Mouse")) {
+    if (!ensure_class(CLASS_KEYBOARD, "Macroclickwerk Virtual Keyboard") ||
+        !ensure_class(CLASS_POINTER, "Macroclickwerk Virtual Mouse")) {
         release_devices();
         return EXIT_FAILURE;
     }
@@ -1347,7 +1347,7 @@ int main(int argc, char *argv[]) {
         if (soft_stop) {
             soft_stop = 0;
             release_all_held();
-            fprintf(stderr, "clickmate: playback stopped, held keys released\n");
+            fprintf(stderr, "macroclickwerk: playback stopped, held keys released\n");
         }
     }
 
