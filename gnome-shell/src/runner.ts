@@ -108,6 +108,8 @@ export class MacroRunner {
      * step aimed at 'prev' goes back to. Per run: a fresh run has no history.
      */
     private _prevPointer: { x: number; y: number } | null = null;
+    /** Set by a 'store' move: 'prev' then means that spot, not the last excursion. */
+    private _prevPinned = false;
 
     constructor(
         daemon: DaemonClient,
@@ -192,6 +194,7 @@ export class MacroRunner {
         this._failedStepId = '';
         this._macroId = macro.id;
         this._prevPointer = null;
+        this._prevPinned = false;
         this._resume = resumeAt ? pathToStep(macro.body, resumeAt) : [];
         this._callbacks.onRunningChanged?.(true);
 
@@ -254,6 +257,7 @@ export class MacroRunner {
         // The ▶ button is not a run: "@ previous" must not consume history
         // left over from whichever full run happened to finish last.
         this._prevPointer = null;
+        this._prevPinned = false;
         this._callbacks.onRunningChanged?.(true);
         let result: { ok: boolean; message: string };
         try {
@@ -520,6 +524,14 @@ export class MacroRunner {
             await this._playRelative(step.dx ?? 0, step.dy ?? 0);
             return;
         }
+        // A store touches nothing — no motion, no daemon — it only decides
+        // what 'prev' means from here on.
+        if (step.mode === 'store') {
+            const [px, py] = global.get_pointer();
+            this._prevPointer = { x: px, y: py };
+            this._prevPinned = true;
+            return;
+        }
         // Only the move to hold together here — there is nothing after it.
         await this._daemon.exclusive(lease => this._moveToTarget(step, lease));
     }
@@ -529,9 +541,11 @@ export class MacroRunner {
      * 'prev' the position stored before the last positioned step — the pointer
      * put back where it was before the macro reached over. Every positioned
      * step remembers the spot it leaves, latest writer wins, so the store sits
-     * here at the one place steps actually move. A 'prev' before any excursion
-     * has nowhere to go and stays put, which for a click means clicking where
-     * the pointer already is.
+     * here at the one place steps actually move — unless a 'store' step pinned
+     * a spot deliberately; then that spot is what 'prev' means until the run
+     * ends or another store replaces it. A 'prev' before any excursion has
+     * nowhere to go and stays put, which for a click means clicking where the
+     * pointer already is.
      */
     private async _moveToTarget(step: ClickStep | MoveStep, lease: Playback): Promise<void> {
         const target = step.mode === 'prev'
@@ -540,8 +554,10 @@ export class MacroRunner {
         if (!target) {
             return;
         }
-        const [px, py] = global.get_pointer();
-        this._prevPointer = { x: px, y: py };
+        if (!this._prevPinned) {
+            const [px, py] = global.get_pointer();
+            this._prevPointer = { x: px, y: py };
+        }
         await this._moveAbs(target.x, target.y, lease);
     }
 

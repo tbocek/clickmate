@@ -108,8 +108,12 @@ export type ClickStep = StepCommon & {
 
 export type MoveStep = StepCommon & {
     kind: 'move';
-    /** 'prev' is the same return move a 'prev' click makes, without the click. */
-    mode: 'abs' | 'rel' | 'prev';
+    /**
+     * 'prev' is the same return move a 'prev' click makes, without the click.
+     * 'store' does not move at all: it remembers where the pointer is now, and
+     * that spot is what 'prev' means for the rest of the run.
+     */
+    mode: 'abs' | 'rel' | 'prev' | 'store';
     x?: number;
     y?: number;
     dx?: number;
@@ -998,6 +1002,7 @@ export function describeStep(
         case 'move':
             return step.mode === 'abs' ? `Move to ${step.x ?? 0},${step.y ?? 0}`
                 : step.mode === 'prev' ? 'Move to previous'
+                : step.mode === 'store' ? 'Store pointer position'
                 : `Move by ${step.dx ?? 0},${step.dy ?? 0}`;
         case 'scroll':
             return `Scroll ${step.dx ? `${step.dx} horizontally` : ''}${step.dx && step.dy ? ', ' : ''}${step.dy ? `${step.dy} vertically` : ''}`.trim() || 'Scroll';

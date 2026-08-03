@@ -18,6 +18,7 @@ import {
     type ConditionType,
     type LlmCondition,
     type Macro,
+    type MouseButton,
     type MoveStep,
     type Region,
     type Step,
@@ -114,6 +115,21 @@ const STEP_ICONS: Record<StepKind, string> = {
     start: 'view-refresh-symbolic',       // start, and start again: the same request
     stop: 'process-stop-symbolic',
 };
+
+/** The buttons a click can use, in the order they are offered. */
+const MOUSE_BUTTONS: MouseButton[] = ['left', 'right', 'middle', 'side', 'extra'];
+
+/**
+ * Built on demand, not at file scope: gettext is not ready when this module is
+ * imported, and translating there fails the import outright.
+ */
+const mouseButtonLabels = (): Record<MouseButton, string> => ({
+    left: _('Left'),
+    right: _('Right'),
+    middle: _('Middle'),
+    side: _('Side'),
+    extra: _('Extra'),
+});
 
 /**
  * The kinds worth a play button: one action each, over as soon as it is done.
@@ -285,6 +301,38 @@ function comboRow<T extends string>(
     return row;
 }
 
+/**
+ * The chooser half of comboRow, without the row, for when it belongs beside
+ * another setting instead of on a line of its own. Same change tracking.
+ */
+function chooser<T extends string>(
+    options: readonly T[],
+    labels: Record<string, string>,
+    selected: T,
+    tooltip: string,
+    onChange: (value: T) => void,
+): Gtk.DropDown {
+    const model = new Gtk.StringList();
+    for (const option of options) {
+        model.append(labels[option] ?? option);
+    }
+    const dropdown = new Gtk.DropDown({
+        model,
+        selected: Math.max(0, options.indexOf(selected)),
+        tooltip_text: tooltip,
+        valign: Gtk.Align.CENTER,
+    });
+    let current = selected;
+    dropdown.connect('notify::selected', () => {
+        const value = options[dropdown.get_selected()];
+        if (value !== undefined && value !== current) {
+            current = value;
+            onChange(value);
+        }
+    });
+    return dropdown;
+}
+
 function iconButton(iconName: string, tooltip: string, onClick: () => void): Gtk.Button {
     const button = new Gtk.Button({
         icon_name: iconName,
@@ -425,6 +473,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
     private _recordControls: Gtk.Widget[] = [];
     /** Shared dropdown models: the choices never differ between rows. */
     private _stepKindsModel?: Gtk.StringList;
+    private _buttonsModel?: Gtk.StringList;
     private _recordChoicesModel?: Gtk.StringList;
     /** The row currently painted as the target, so it can be unpainted. */
     private _markedRow?: Gtk.Widget;
@@ -544,7 +593,9 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
      * alternative — 'current' for a click, 'rel' for a move — described by
      * `on`. And either step can aim at 'prev', back to where the pointer was
      * before the last positioned step; that state reads the same on both, so
-     * everything about it lives here rather than with the callers.
+     * everything about it lives here rather than with the callers. A move can
+     * additionally offer 'store' via `store` — remember the spot rather than
+     * go anywhere — which is the other half of 'prev': one marks, one returns.
      */
     private _positionRow(opts: {
         step: ClickStep | MoveStep;
@@ -553,6 +604,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         onModeName: 'current' | 'rel';
         off: { title: string; values: () => number[] };
         on: { title: string; subtitle?: string; values?: () => number[] };
+        store?: { title: string; subtitle?: string };
         apply: (values: number[]) => void;
     }): Adw.ActionRow {
         type RowState = { title: string; subtitle?: string; values?: () => number[] };
@@ -560,10 +612,16 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
             title: _('Position'),
             subtitle: _('Where the pointer was before the last positioned step'),
         };
+        const storeState: RowState | null = opts.store ?? null;
         const row = new Adw.ActionRow();
-        let mode: 'off' | 'on' | 'prev' =
-            opts.step.mode === 'prev' ? 'prev' : opts.step.mode === opts.onModeName ? 'on' : 'off';
-        const state = (): RowState => (mode === 'prev' ? prevState : mode === 'on' ? opts.on : opts.off);
+        let mode: 'off' | 'on' | 'prev' | 'store' =
+            opts.step.mode === 'prev' ? 'prev'
+            : storeState && opts.step.mode === 'store' ? 'store'
+            : opts.step.mode === opts.onModeName ? 'on' : 'off';
+        const state = (): RowState =>
+            mode === 'prev' ? prevState
+            : mode === 'store' && storeState ? storeState
+            : mode === 'on' ? opts.on : opts.off;
 
         const entry = this._numbersEntry(opts.off.values(), values => {
             opts.apply(values);
@@ -582,6 +640,9 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
             () => this._showMarker(...point()));
 
         const toggle = toggleButton(opts.toggleIcon, opts.toggleTip, mode === 'on');
+        const storeBtn = storeState ? toggleButton('bookmark-new-symbolic',
+            _('Remember where the pointer is now: from here on, “previous” returns to this spot'),
+            mode === 'store') : null;
         const history = toggleButton('document-open-recent-symbolic',
             _('Go back to where the pointer was before the last positioned step'), mode === 'prev');
 
@@ -605,16 +666,19 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         // in place rather than rebuilt: a rebuild would take the button you
         // just pressed down with it.
         let settling = false;
-        const setMode = (next: 'off' | 'on' | 'prev') => {
+        const setMode = (next: 'off' | 'on' | 'prev' | 'store') => {
             mode = next;
             settling = true;
             toggle.set_active(mode === 'on');
+            storeBtn?.set_active(mode === 'store');
             history.set_active(mode === 'prev');
             settling = false;
             // The one place the row's vocabulary meets the step's. Cast because
             // a union field only accepts writes both members allow.
             (opts.step as { mode: string }).mode =
-                mode === 'on' ? opts.onModeName : mode === 'prev' ? 'prev' : 'abs';
+                mode === 'on' ? opts.onModeName
+                : mode === 'prev' ? 'prev'
+                : mode === 'store' ? 'store' : 'abs';
             sync();
             this._refreshStepTitle(opts.step);
             this._save();
@@ -622,6 +686,11 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         toggle.connect('toggled', () => {
             if (!settling) {
                 setMode(toggle.get_active() ? 'on' : 'off');
+            }
+        });
+        storeBtn?.connect('toggled', () => {
+            if (!settling) {
+                setMode(storeBtn.get_active() ? 'store' : 'off');
             }
         });
         history.connect('toggled', () => {
@@ -635,6 +704,9 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         row.add_suffix(pick);
         row.add_suffix(show);
         row.add_suffix(toggle);
+        if (storeBtn) {
+            row.add_suffix(storeBtn);
+        }
         row.add_suffix(history);
         return row;
     }
@@ -1369,6 +1441,53 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
             suffixes.append(count);
         }
 
+        // Same bargain the loop's count makes: a click is a button and a hold,
+        // two small controls that are shorter than the fold they were hiding
+        // behind, and they read as the line they sit on — "Click left @ 840,512".
+        if (step.kind === 'click') {
+            if (!this._buttonsModel) {
+                const labels = mouseButtonLabels();
+                this._buttonsModel = new Gtk.StringList();
+                for (const button of MOUSE_BUTTONS) {
+                    this._buttonsModel.append(labels[button]);
+                }
+            }
+            const which = new Gtk.DropDown({
+                model: this._buttonsModel,
+                selected: Math.max(0, MOUSE_BUTTONS.indexOf(step.button)),
+                tooltip_text: _('Which mouse button'),
+                valign: Gtk.Align.CENTER,
+            });
+            which.connect('notify::selected', () => {
+                if (this._rebuilding) {
+                    return;
+                }
+                step.button = MOUSE_BUTTONS[which.get_selected()] ?? 'left';
+                // The title is the sentence this dropdown is a word of, so it
+                // is rewritten in place rather than by rebuilding the page —
+                // a rebuild would close the dropdown you are still looking at.
+                row.set_title(this._describe(step));
+                this._save();
+            });
+            suffixes.append(which);
+
+            const hold = new Gtk.SpinButton({
+                adjustment: new Gtk.Adjustment({
+                    lower: 0, upper: 10000, step_increment: 5, page_increment: 50,
+                    value: step.holdMs ?? 20,
+                }),
+                tooltip_text: _('How long the button stays down, in milliseconds'),
+                valign: Gtk.Align.CENTER,
+                numeric: true,
+                width_chars: 4,
+            });
+            hold.connect('value-changed', () => {
+                step.holdMs = hold.get_value_as_int();
+                this._save();
+            });
+            suffixes.append(hold);
+        }
+
         if (RUNNABLE_ALONE.includes(step.kind)) {
             suffixes.append(iconButton('media-playback-start-symbolic',
                 _('Do this one step now, on the real screen'),
@@ -1478,12 +1597,9 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
 
         switch (step.kind) {
             case 'click':
-                rows.push(comboRow(_('Button'), ['left', 'right', 'middle', 'side', 'extra'] as const,
-                    { left: _('Left'), right: _('Right'), middle: _('Middle'), side: _('Side'), extra: _('Extra') },
-                    step.button, value => {
-                        step.button = value;
-                        rebuild();
-                    }));
+                // Button is not here either: which button and how long it is
+                // held both sit on the step's own line, where the title already
+                // says "Click left @ …" and the controls can finish the sentence.
                 rows.push(this._positionRow({
                     step,
                     // The toggles are the whole of the old Position dropdown: one
@@ -1498,10 +1614,8 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                         step.y = y;
                     },
                 }));
-                rows.push(spinRow(_('Hold (ms)'), step.holdMs ?? 20, 0, 10000, 5, value => {
-                    step.holdMs = Math.round(value);
-                    save();
-                }));
+                // Hold is not here: it sits on the step's own line, beside the
+                // click it belongs to.
                 break;
 
             case 'move':
@@ -1514,6 +1628,10 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                     // An offset is numbers too — they just are not a place, so
                     // there is nothing to point at or flash on the screen.
                     on: { title: _('Offset'), values: () => [step.dx ?? 0, step.dy ?? 0] },
+                    store: {
+                        title: _('Position'),
+                        subtitle: _('Remember where the pointer is now; “previous” returns here'),
+                    },
                     apply: ([a, b]) => {
                         if (step.mode === 'rel') {
                             step.dx = a;
@@ -1667,12 +1785,27 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
         replace: (next: Condition) => void,
         key: string,
     ): Gtk.Widget[] {
-        const rows: Gtk.Widget[] = [];
-        rows.push(comboRow(title, CONDITION_TYPES, CONDITION_TYPE_LABELS, condition.type, type => {
-            replace(newCondition(type));
-        }));
-        rows.push(...this._buildConditionRows(condition, replace, key));
-        return rows;
+        const rows = this._buildConditionRows(condition, replace, key);
+        const pick = chooser(
+            CONDITION_TYPES, CONDITION_TYPE_LABELS, condition.type,
+            _('What this condition checks'),
+            type => replace(newCondition(type)),
+        );
+
+        // The type and the setting that qualifies it are one sentence — ask the
+        // LLM, about this prompt — so the chooser joins that setting rather than
+        // spending a line above it saying only its own name. Conditions that
+        // lead with a fold (all of, any of, not) or show nothing at all
+        // (always) keep the row: there is no line there to share.
+        const headline = rows[0];
+        if (headline instanceof Adw.ActionRow || headline instanceof Adw.EntryRow) {
+            headline.add_suffix(pick);
+            return rows;
+        }
+
+        const row = new Adw.ActionRow({ title });
+        row.add_suffix(pick);
+        return [row, ...rows];
     }
 
     private _buildConditionRows(
