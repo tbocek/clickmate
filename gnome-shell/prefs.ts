@@ -302,6 +302,32 @@ function comboRow<T extends string>(
 }
 
 /**
+ * The number half of spinRow, without the row, for when it belongs beside
+ * another setting instead of on a line of its own. Whole numbers only — every
+ * one of these counts something: milliseconds, pixels, how far off a colour is.
+ */
+function spinSuffix(
+    value: number,
+    lower: number,
+    upper: number,
+    step: number,
+    tooltip: string,
+    onChange: (value: number) => void,
+): Gtk.SpinButton {
+    const spin = new Gtk.SpinButton({
+        adjustment: new Gtk.Adjustment({
+            lower, upper, stepIncrement: step, pageIncrement: step * 10, value,
+        }),
+        tooltip_text: tooltip,
+        valign: Gtk.Align.CENTER,
+        numeric: true,
+        width_chars: 4,
+    });
+    spin.connect('value-changed', () => onChange(spin.get_value_as_int()));
+    return spin;
+}
+
+/**
  * The chooser half of comboRow, without the row, for when it belongs beside
  * another setting instead of on a line of its own. Same change tracking.
  */
@@ -1471,21 +1497,11 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
             });
             suffixes.append(which);
 
-            const hold = new Gtk.SpinButton({
-                adjustment: new Gtk.Adjustment({
-                    lower: 0, upper: 10000, step_increment: 5, page_increment: 50,
-                    value: step.holdMs ?? 20,
-                }),
-                tooltip_text: _('How long the button stays down, in milliseconds'),
-                valign: Gtk.Align.CENTER,
-                numeric: true,
-                width_chars: 4,
-            });
-            hold.connect('value-changed', () => {
-                step.holdMs = hold.get_value_as_int();
-                this._save();
-            });
-            suffixes.append(hold);
+            suffixes.append(spinSuffix(step.holdMs ?? 20, 0, 10000, 5,
+                _('How long the button stays down, in milliseconds'), value => {
+                    step.holdMs = value;
+                    this._save();
+                }));
         }
 
         if (RUNNABLE_ALONE.includes(step.kind)) {
@@ -1792,18 +1808,27 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
             type => replace(newCondition(type)),
         );
 
-        // The type and the setting that qualifies it are one sentence — ask the
-        // LLM, about this prompt — so the chooser joins that setting rather than
-        // spending a line above it saying only its own name. Conditions that
-        // lead with a fold (all of, any of, not) or show nothing at all
+        // A group's rows are its children, and this line is the one thing that
+        // holds them together — it says how many there are and stays put.
+        const group = condition.type === 'and' || condition.type === 'or'
+            ? condition.of : null;
+
+        // Otherwise the type and the setting that qualifies it are one sentence
+        // — ask the LLM, about this prompt — so the chooser joins that setting
+        // rather than spending a line above it saying only its own name.
+        // Conditions that lead with a fold (not) or show nothing at all
         // (always) keep the row: there is no line there to share.
         const headline = rows[0];
-        if (headline instanceof Adw.ActionRow || headline instanceof Adw.EntryRow) {
+        if (!group && (headline instanceof Adw.ActionRow || headline instanceof Adw.EntryRow)) {
             headline.add_suffix(pick);
             return rows;
         }
 
         const row = new Adw.ActionRow({ title });
+        if (group) {
+            row.set_subtitle(
+                `${group.length} ${group.length === 1 ? _('condition') : _('conditions')}`);
+        }
         row.add_suffix(pick);
         return [row, ...rows];
     }
@@ -1889,14 +1914,21 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                     // The size stays: what you are pointing at is which pixel to
                     // look at, not how big a patch of it to take.
                     (x, y, [, , w, h]) => [x, y, w, h]));
-                rows.push(entryRow(_('Colour (#rrggbb)'), condition.color, text => {
-                    condition.color = text.trim();
-                    save();
-                }));
-                rows.push(spinRow(_('Tolerance'), condition.tolerance, 0, 442, 1, value => {
-                    condition.tolerance = Math.round(value);
-                    save();
-                }));
+                {
+                    // Tolerance sits on the colour it is a tolerance of: on its
+                    // own line the number said nothing about what it measured.
+                    const colourRow = entryRow(_('Colour (#rrggbb)'), condition.color, text => {
+                        condition.color = text.trim();
+                        save();
+                    });
+                    colourRow.add_suffix(spinSuffix(condition.tolerance, 0, 442, 1,
+                        _('Tolerance: how far off this colour a pixel may be and still count'),
+                        value => {
+                            condition.tolerance = value;
+                            save();
+                        }));
+                    rows.push(colourRow);
+                }
                 // Coverage is meaningless for a single pixel, which is the
                 // default shape, so it only appears once there is an area.
                 if (condition.w * condition.h > 1) {
@@ -1924,11 +1956,10 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
 
             case 'and':
             case 'or': {
-                const container = this._expander(`${key}:group`, {
-                    title: condition.type === 'and' ? _('All of these must hold') : _('Any of these must hold'),
-                    subtitle: `${condition.of.length} ${condition.of.length === 1 ? _('condition') : _('conditions')}`,
-                });
-
+                // No fold of its own: the line above already says "all of" or
+                // "any of" and carries the count, so a second line saying the
+                // same thing only bought a level of indentation. The children
+                // sit directly under it, each still folding on its own.
                 const addRow = new Adw.ActionRow({ title: _('Add a sub-condition') });
                 const model = new Gtk.StringList();
                 const addable = CONDITION_TYPES.filter(type => type !== 'always');
@@ -1943,7 +1974,7 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                 });
                 addRow.add_suffix(dropdown);
                 addRow.add_suffix(addButton);
-                container.add_row(addRow);
+                rows.push(addRow);
 
                 condition.of.forEach((child, index) => {
                     const childRow = this._expander(`${key}:${index}`, {
@@ -1959,10 +1990,9 @@ export default class MacroclickwerkPreferences extends ExtensionPreferences {
                     }, `${key}:${index}`)) {
                         childRow.add_row(widget);
                     }
-                    container.add_row(childRow);
+                    rows.push(childRow);
                 });
 
-                rows.push(container);
                 break;
             }
         }
